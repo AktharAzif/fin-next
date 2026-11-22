@@ -215,18 +215,32 @@ function samples(rand: () => number): Sample[] {
   ];
 }
 
-// A linear-time check judges two things and fails only when both say quadratic: the time at 1 MB,
-// and its growth from 128 KB, eight times less input. A quadratic part takes seconds or minutes at
-// 1 MB and grows about 64 times, so it fails both. Each time is the fastest of three runs, the
-// sizes taking turns, and it is the thread's CPU time, not the clock on the wall: what load adds
-// is time spent waiting for a core, and it adds it unevenly. With many threads to each core, a run
-// that fits in one scheduler slice keeps its wall time while a longer one waits between slices:
-// on such a machine a linear shape took over a second of wall time at 1 MB, and its wall-clock
-// growth reached 84, while its CPU time stayed under 100 ms and grew about eight times.
+// A linear-time check judges the time at 1 MB and its growth from 128 KB, eight times less input,
+// and a shape fails in either of two ways: its time at 1 MB is over the ceiling, whatever its
+// growth, or it is over a lower limit and its growth is far above linear. A quadratic part takes
+// seconds or minutes at 1 MB and grows about 64 times; a part that grows more slowly but is costly,
+// such as a bounded run of hundreds of characters tried at every position, fails on the ceiling
+// alone. Each time is the fastest of three runs, the sizes taking turns, and it is the thread's CPU
+// time, not the clock on the wall: what load adds is time spent waiting for a core, and it adds it
+// unevenly. With many threads to each core, a run that fits in one scheduler slice keeps its wall
+// time while a longer one waits between slices: on such a machine a linear shape took over a
+// second of wall time at 1 MB, and its wall-clock growth reached 84, while its CPU time stayed
+// under 100 ms and grew about eight times. CPU time is what lets the ceiling stand alone.
 const SMALL_INPUT = 128 * 1024;
 const LARGE_INPUT = 1024 * 1024;
-/** The CPU time at 1 MB a linear shape stays far under: the slowest takes under 100 ms. */
-const LIMIT_MS = 1000;
+/**
+ * The CPU time at 1 MB no shape may pass, whatever its growth. Load barely moves CPU time, so this
+ * needs no growth beside it: the slowest shape takes under 100 ms, and under 170 ms at background
+ * priority on the efficiency cores of a loaded machine.
+ */
+const CEILING_MS = 1000;
+/**
+ * The CPU time at 1 MB above which growth decides. A quadratic part that takes a shape over it
+ * grows the shape over MAX_GROWTH even behind the slowest linear part (about 7 ms at 128 KB), so it
+ * fails here, long before the ceiling. A linear shape would have to be slowed two and a half times
+ * and grow twice its most to fail.
+ */
+const LIMIT_MS = 250;
 /**
  * Growth from 128 KB to 1 MB: about 8 times for a linear shape, about 64 for a quadratic one. 24
  * sits near their geometric mean (about 23), about a factor of three from each: load would have to
@@ -250,7 +264,16 @@ function threadCpuMs(): number {
   return (user + system) / 1000;
 }
 
-/** Fails when `scrub` is quadratic on the input `build` makes at 128 KB and at 1 MB. */
+/** The growth from a 128 KB time to a 1 MB time, with the floor under the 128 KB time. */
+const growthOf = (smallMs: number, largeMs: number): number =>
+  largeMs / Math.max(smallMs, FLOOR_MS);
+
+/** Whether a shape's fastest CPU times at 128 KB and at 1 MB fail the linear-time check. */
+function tooSlow(smallMs: number, largeMs: number): boolean {
+  return largeMs > CEILING_MS || (largeMs > LIMIT_MS && growthOf(smallMs, largeMs) > MAX_GROWTH);
+}
+
+/** Fails when `scrub` is too slow or quadratic on the input `build` makes at 128 KB and 1 MB. */
 function expectLinearTime(
   name: string,
   build: (size: number) => string,
@@ -269,10 +292,10 @@ function expectLinearTime(
     smallMs = Math.min(smallMs, time(small));
     largeMs = Math.min(largeMs, time(large));
   }
-  const growth = largeMs / Math.max(smallMs, FLOOR_MS);
+  const growth = growthOf(smallMs, largeMs);
   const ms = (value: number): string => `${value.toFixed(1)} ms of CPU`;
   const seen = `${ms(smallMs)} at 128 KB, ${ms(largeMs)} at 1 MB, growth ${growth.toFixed(1)}`;
-  expect(largeMs > LIMIT_MS && growth > MAX_GROWTH, `${name}: ${seen}`).toBe(false);
+  expect(tooSlow(smallMs, largeMs), `${name}: ${seen}`).toBe(false);
 }
 
 /** Builds an adversarial input: the unit repeated to the input's size, then the tail. */
@@ -283,6 +306,28 @@ const filler =
   (size: number): Fill =>
   (unit, tail = "") =>
     unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
+
+describe("the linear-time check", () => {
+  it("fails a shape over the ceiling whatever its growth, and a quadratic one over the limit", () => {
+    // [CPU ms at 128 KB, CPU ms at 1 MB, fails]: measured times of the real scrubber and of
+    // scrubbers changed to be slow, then the edges of the rule.
+    const cases: [number, number, boolean][] = [
+      [6.9, 68.9, false], // the slowest real shape
+      [0.004, 0.004, false], // a shape near clock resolution
+      [276.3, 2177.3, true], // a bounded run of 600 tried at every position: linear, and costly
+      [549.9, 5280.7, true], // n log n
+      [46.6, 3002.0, true], // quadratic
+      [100, 1000, false], // at the ceiling
+      [200, 1001, true], // over the ceiling, growth 5
+      [13, 300, false], // over the limit, growth 23
+      [10, 260, true], // over the limit, growth 26
+      [3, 240, false], // under the limit, growth 48: a quadratic part too small to matter yet
+    ];
+    for (const [smallMs, largeMs, fails] of cases) {
+      expect(tooSlow(smallMs, largeMs), `${smallMs} ms, ${largeMs} ms`).toBe(fails);
+    }
+  });
+});
 
 describe("scrubText", () => {
   for (const sample of samples(prng(1))) {
