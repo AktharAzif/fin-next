@@ -121,7 +121,7 @@ Three days is aggressive. The plan makes it possible by doing six things:
 | **Mon 23 Nov, R8** | Money schema with Fin's double-entry ledger and holds; the `ProviderAdapter` interface with declared capabilities; the Fin simulator and the conformance suite; the MassPay adapter (sandbox) in `payments`, with the money jobs and the hook door there; virtual accounts, beneficiaries with sealed full numbers, transfers with per-transfer intents, Sandbox deposits; provider webhooks and reconciliation with automatic trips; the money API and screens; the read-only Fin Admin money view; the docs site as an assets-only deployment, with the reference and "Try it" calling `gateway.` cross-origin, without credentials, on Sandbox keys (R16) | Fin Admin money operations; a second adapter skeleton; docs guides beyond getting started | Real inbound deposits; MassPay live; value caps and the first-payout delay ([MO-19]); ledger drills |
 | **Tue 24 and Wed 25 Nov** | Two spill days for the three days' must-haves | | |
 | **Thu 26 Nov** | **Staging-complete**, 22:00 target (UNVERIFIED) | | |
-| **From Fri 27 Nov** | Hardening (§6) | | Production gates PG-01 to PG-14 (§7) |
+| **From Fri 27 Nov** | Hardening (§6) | | Production gates PG-01 to PG-17 (§7) |
 
 ### 0.2 Requirement status at staging-complete
 
@@ -131,7 +131,7 @@ report at the end of each day carries this table, so a partial requirement is a 
 
 | Req | At staging-complete | What is missing, and where it is completed |
 |---|---|---|
-| R1 Production-ready, from scratch | Partial | Production readiness is §7's gates (PG-01 to PG-14). Nothing is ported: the owner answered [UI-12] no (21 Nov, about 08:28), so the UI is built fresh from the canvases and [G-04] has no exception (§0.3, decision 2) |
+| R1 Production-ready, from scratch | Partial | Production readiness is §7's gates (PG-01 to PG-17). Nothing is ported: the owner answered [UI-12] no (21 Nov, about 08:28), so the UI is built fresh from the canvases and [G-04] has no exception (§0.3, decision 2) |
 | R2 Everything on Railway, including the database | Full for compute and the database. Off Railway by the owner's decisions: the apps' static files (assets-only deployments that run no code, [FD-17]), and the vault, the watcher ([OB-18]), the tunnels' edge, Access and email ([P-02]) | none: [P-02] was decided overnight |
 | R3 Cloudflare Email Sending | Full on staging, sent only by `worker` from its static egress | Production: the beta acceptance ([EM-02]) and the two-week warm-up ([EM-08]) (the warm-up largely falls away on the owner's existing production domain; a short ramp may remain) |
 | R4 Cloudflare in front of Railway | Full: tunnels for every API host, assets-only static deployments for every app host, one origin per app, watched every minute | The evict drill and SP-04h in hardening (PG-05) |
@@ -1718,6 +1718,9 @@ being untrue:
 | PG-10 | Production accounts | §7.2 built; no production login is a member of the staging account and the reverse (read in each account); a throwaway environment provisioned from scratch with zero drift ([OP-09]); the portability drill done (H-15) |
 | PG-11 | Vendors | Email Sending's beta terms and its token's suppression-editing scope accepted in writing ([EM-02]), and the second-sender decision ([EM-03]); the UI SDK's beta terms read and accepted; Railway's and Better Stack's SOC 2 reports and DPAs read; Railway told about the expected egress ([P-22]); Sumsub production levels, webhook and IP allowlist in place |
 | PG-12 | The old staging | Not affected: staging keeps its final names on the shared zone, so there is no hostname cutover ([FD-09]) |
+| PG-15 | Nothing owed (before PG-13) | `ops/monitoring/catalog/owed.ts` lists no alert. A gate built on the path production really takes (the operator's launcher, [FD-19], static uploads included) reads that list as data, fails closed when it cannot read it, and refuses the deploy while any entry remains (the steward's ruling of 22 Nov; the owner's invariant of 22 Nov) |
+| PG-16 | No open follow-up (before PG-13) | No `[follow-up]` item is open ([G-10] as amended 22 Nov 2026; spec 07 §2.11): the same gate reads the backlog (spec 07 §7.4) as data, fails closed when it cannot read it, and refuses while any `[follow-up]` item lacks the disposition fixed |
+| PG-17 | Every low disposed (before PG-13) | Every low has a disposition, fixed or accepted with a one-line reason; the accepted list is signed off by the owner in one go; a low the reviewers marked as touching security or as visible to users is fixed, never accepted. The same gate reads the backlog's lows (finding ID, pull request, area, severity, disposition, reason) and refuses while any low lacks a disposition |
 | PG-13 | Owner's go | The owner's explicit, written go for production |
 | PG-14 | Live money (after PG-13) | MassPay's answers on live limits, cut-offs, fees and businesses; egress allowlisting in place; real inbound deposits seen and posted; reconciliation running, alerting and tripping in production; value caps, the first-payout delay and the second approver set ([MO-19]); live money keys with address allowlists ([MO-20]); payouts confirmed durable before submission ([MO-18]); a security email on every new beneficiary; the live host enabled by a reviewed change and the live-money switch tested; a small live transfer drill end to end |
 
