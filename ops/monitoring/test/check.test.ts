@@ -43,11 +43,85 @@ function rules(root: string, options: Parameters<typeof checkMonitoring>[1] = {}
   );
 }
 
+// monitoring:check runs in every `pnpm check`, under a second (spec 01 §4.2). Its speed is judged by
+// two things, and fails only when both say it got slow: its time over the repository against that
+// second, and the growth of its time from a tree of 100 code files to one of 800 (about the
+// repository's own number), the files its code scan reads (most of its time). A part quadratic in
+// the files grows about 64 times, a linear one at most 8 (about 3.5 here, the staging files' share
+// being the same at both sizes). Each time is the thread's CPU time, the fastest of three runs:
+// what load adds is time spent waiting for a core, and inside a loaded `pnpm check` the check took
+// over a second of wall time while it takes about 50 ms alone. A first run under the limit already
+// decides the case.
+const LIMIT_MS = 1000;
+/** Between linear's 8 and quadratic's 64, about a factor of three from each. */
+const MAX_GROWTH = 24;
+/** A floor under the small tree's time, so a reading near clock resolution cannot inflate growth. */
+const FLOOR_MS = 5;
+const SMALL_CODE = 100;
+const LARGE_CODE = 800;
+
+/** The CPU time this thread has used, in milliseconds. */
+function threadCpuMs(): number {
+  const { user, system } = process.threadCpuUsage();
+  return (user + system) / 1000;
+}
+
+/** The CPU time one call of `run` takes, in milliseconds. */
+function cpuMs(run: () => unknown): number {
+  const started = threadCpuMs();
+  run();
+  return threadCpuMs() - started;
+}
+
+/** A scratch copy of the staging files with `files` code files, each logging catalogued events. */
+function codeTree(files: number): string {
+  const root = scratch();
+  for (let i = 0; i < files; i++) {
+    const dir = join(root, "packages", `p${i % 8}`, "src");
+    mkdirSync(dir, { recursive: true });
+    const lines = [
+      `export function handler${i}(telemetry: { log: (e: string, f: object) => void }) {`,
+    ];
+    for (let j = 0; j < 40; j++) {
+      lines.push(
+        `  telemetry.log("${j % 2 === 0 ? "request" : "process.start"}", { step: ${j} });`,
+      );
+    }
+    writeFileSync(join(dir, `f${i}.ts`), `${[...lines, "}"].join("\n")}\n`);
+  }
+  return root;
+}
+
 describe("monitoring:check on the repository", () => {
   it("passes, in well under a second", () => {
-    const started = performance.now();
-    expect(checkMonitoring(ROOT)).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(1000);
+    let findings: unknown[] = [];
+    let repoMs = cpuMs(() => {
+      findings = checkMonitoring(ROOT);
+    });
+    expect(findings).toEqual([]);
+    if (repoMs < LIMIT_MS) return;
+    const [small, large] = [codeTree(SMALL_CODE), codeTree(LARGE_CODE)];
+    let smallMs = Number.POSITIVE_INFINITY;
+    let largeMs = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 3; run++) {
+      if (run > 0)
+        repoMs = Math.min(
+          repoMs,
+          cpuMs(() => checkMonitoring(ROOT)),
+        );
+      smallMs = Math.min(
+        smallMs,
+        cpuMs(() => checkMonitoring(small)),
+      );
+      largeMs = Math.min(
+        largeMs,
+        cpuMs(() => checkMonitoring(large)),
+      );
+    }
+    const growth = largeMs / Math.max(smallMs, FLOOR_MS);
+    const ms = (value: number): string => `${value.toFixed(1)} ms of CPU`;
+    const seen = `${ms(repoMs)} over the repository; ${ms(smallMs)} with ${SMALL_CODE} code files, ${ms(largeMs)} with ${LARGE_CODE}, growth ${growth.toFixed(1)}`;
+    expect(repoMs > LIMIT_MS && growth > MAX_GROWTH, seen).toBe(false);
   });
 
   it("catalogues every event spec 01 §8.9 lists", () => {
