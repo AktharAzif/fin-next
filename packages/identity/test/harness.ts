@@ -257,9 +257,12 @@ export async function codeSignIn(h: Harness, browser: Browser, email: string): P
  * realm requests pay once for what every later request reuses: the library's context, the code
  * each path runs (compiled on its first call), and the pools' first connections with their
  * server backends' caches. Without this the file's first test carried all of it, whatever it was
- * about. Nothing a test asserts reads this person, its rows or its lines: a test that reads every
- * row of a kind keeps its own person's, and a file with an assertion that any row of a kind the
- * warm-up writes exists (pins.db.test.ts' user.created) does not warm up.
+ * about. Measured on GitHub's runner (22 Nov): alone, the warm-up's four requests take 0.12 s,
+ * the same four in a later test 0.05 s; in the full db run the warm-up takes 0.46 to 1.36 s,
+ * inside its hook's 10 s, and each warmed file's first test fell from 0.56-1.58 s to 0.10-0.82 s.
+ * Nothing a test asserts reads this person, its rows or its lines: a test that reads every row of
+ * a kind keeps its own person's, and a file with an assertion that any row of a kind the warm-up
+ * writes exists (pins.db.test.ts' user.created) does not warm up.
  */
 export async function warmUp(h: Harness): Promise<void> {
   if (h.realm.settings.realm !== "developer") throw new Error("warmUp starts a developer realm");
