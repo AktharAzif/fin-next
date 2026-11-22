@@ -84,7 +84,7 @@ describe("the last Admin (§10.8)", () => {
         changeStaffRole(
           h.deps,
           tx,
-          await requireStaff(h.realm, req, ctx, { permission: "staff.role" }),
+          await requireStaff(h.realm, req, ctx, { permission: "staff.role", changeLock: true }),
           target.staffId,
           { roleKey: "viewer" },
         );
@@ -94,8 +94,9 @@ describe("the last Admin (§10.8)", () => {
     ]);
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     const refused = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
-    // The loser re-read itself inside the lock: no longer an Admin, it holds no staff.role.
-    expect((refused.reason as { code: string }).code).toBe("forbidden");
+    // The loser waited for the staff-change lock before its guard read its session, which the
+    // winner's demotion had ended by then: it is refused as signed out (lock.ts).
+    expect((refused.reason as { code: string }).code).toBe("unauthenticated");
     expect(await activeAdmins()).toBe(1);
   });
 
@@ -107,7 +108,7 @@ describe("the last Admin (§10.8)", () => {
         removeStaff(
           h.deps,
           tx,
-          await requireStaff(h.realm, req, ctx, { permission: "staff.remove" }),
+          await requireStaff(h.realm, req, ctx, { permission: "staff.remove", changeLock: true }),
           target.staffId,
         );
     const results = await race([
@@ -139,7 +140,7 @@ describe("the last Admin (§10.8)", () => {
     const check = (staffId: string, change: Parameters<typeof refuseLastActiveAdmin>[3]) =>
       h.db.unit(async (tx) => {
         await takeStaffChangeLock(tx);
-        const target = await memberForChange(tx, staffId);
+        const target = await memberForChange(tx, staffId, new Date());
         if (target === null) throw new Error("no member");
         await refuseLastActiveAdmin(tx, target, await resolveStaffRole(tx, target.roleKey), change);
       });

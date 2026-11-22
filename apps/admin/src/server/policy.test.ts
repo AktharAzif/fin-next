@@ -159,6 +159,18 @@ describe("Fin Admin's route policy", () => {
     }
   });
 
+  it("takes the staff-change lock before the guard on exactly the five staff changes (§10.8)", () => {
+    expect(
+      ADMIN_POLICIES.filter((p) => "changeLock" in p && p.changeLock === true).map((p) => p.id),
+    ).toEqual([
+      "staff.add",
+      "staff.role",
+      "staff.remove",
+      "staff.reset_factors",
+      "staff.enrolment_code",
+    ]);
+  });
+
   it("marks exactly the answers that carry an enrolment code as secret", () => {
     expect(ADMIN_POLICIES.filter((p) => p.secret).map((p) => p.id)).toEqual([
       "staff.add",

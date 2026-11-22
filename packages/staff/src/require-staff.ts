@@ -1,6 +1,8 @@
 // requireStaff (spec 02 §14.1, IF-04): the guard of every Fin Admin app route. It runs inside the
 // route's `realm.run`, so the guard, the action, its audit event and the intent it spends share
 // one unit of work, and reads everything again on every request, never from a cache:
+//   0. on a staff change's route, the staff-change lock first (§10.8), so the session the guard
+//      reads and renews is renewed inside it (lock.ts says why);
 //   1. the staff session, through the realm (the library reads the session row and renews it;
 //      the realm's before-hook applies the staff gate of §6.4 and the Access check of §10.5: a
 //      removed member's session is ended, and one presented under another Access identity is ended
@@ -19,6 +21,7 @@ import type { StaffPermission } from "@fin/access";
 import { AuthRefusal, type Realm, type RequestContext } from "@fin/identity";
 import type { AuditActorInput } from "./audit/record.ts";
 import { resolveStaffRole, type StaffRoleLookup, staffPermissionsOf } from "./catalogue.ts";
+import { takeStaffChangeLock } from "./lock.ts";
 import type { RequestFacts, UnitTx } from "./ports.ts";
 import { requireIntent, type StepUpRef, type StepUpRequest } from "./step-up.ts";
 
@@ -47,6 +50,8 @@ export interface StaffActor {
   methods: readonly FactorMethod[];
   /** The audit actor, without a step-up until `stepUp` adds one. */
   actor: AuditActorInput;
+  /** Whether this unit took the staff-change lock before the guard read the session. */
+  changeLocked: boolean;
   request: RequestFacts;
   /** The intent check for this request's action; call it after the route's own checks. */
   stepUp(tx: UnitTx, request: StepUpRequest): Promise<StepUpRef>;
@@ -57,6 +62,11 @@ export interface RequireStaffOptions {
   permission?: StaffPermission;
   /** The gate states the route may be reached at; `ok` only unless the route is aal1_allowed. */
   reach?: readonly Exclude<StaffGateState, "signed_out">[];
+  /**
+   * A staff change's route (§10.8): the staff-change lock is taken before the session is read, so
+   * the guard renews the session inside it. The changes in members.ts refuse to run without it.
+   */
+  changeLock?: boolean;
   /**
    * Collects the `Set-Cookie` values reading the session produced (a renewed session cookie, or
    * the clearing of a dead one), for the API half to copy onto an answer whose unit committed.
@@ -146,6 +156,8 @@ export async function requireStaff(
 ): Promise<StaffActor> {
   if (realm.settings.realm !== "staff") throw new Error("requireStaff runs on the staff realm");
   return realm.run(context, async (tx, state) => {
+    const changeLocked = options.changeLock === true;
+    if (changeLocked) await takeStaffChangeLock(tx);
     const setCookies = await readStaffSession(realm, request);
     const prior = state.prior;
     if (prior === null) {
@@ -207,6 +219,7 @@ export async function requireStaff(
       factors,
       methods,
       actor: { kind: "staff", id: staffId },
+      changeLocked,
       request: facts,
       stepUp: (unit, step) =>
         requireIntent(

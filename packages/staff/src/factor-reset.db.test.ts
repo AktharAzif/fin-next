@@ -11,27 +11,40 @@
 //     no factor; an intent works for its member only, and once; a notice that cannot be queued
 //     rolls the whole reset back.
 //   - A pending member mid-enrolment loses the window; two Admins resetting at once leave one code.
-//   - The member's own ceremonies cannot outlast it: a passkey sign-in or a further passkey that
-//     was in flight when it committed leaves no session and no factor, the code it showed still
-//     enrols the member, a sign-in that overlaps it cannot make it fail, and one that holds the
-//     member's row first finishes and then loses the session it made.
+//   - The member's own ceremonies cannot outlast it: a passkey sign-in (its credential ID named as
+//     a string or a number), an emailed-code sign-in or a further passkey that was in flight when
+//     it committed leaves no session and no factor, the code it showed still enrols the member, a
+//     sign-in that overlaps it cannot make it fail, and one that holds the member first finishes
+//     and then loses the session it made. No number of forged assertions in flight keeps it out.
 //   - An Admin's own staff change, sent while their own step-up is in flight from a session due
-//     for renewal, answers as it would alone, and the step-up passes.
-import type { RequestContext } from "@fin/identity";
-import type { Pool } from "pg";
+//     for renewal, answers as it would alone, and the step-up passes; two Admins with sessions due
+//     for renewal changing each other at once get one success and one refusal, never a deadlock.
+import { randomInt } from "node:crypto";
+import {
+  createPgDatabase,
+  createRealm,
+  MemoryLineSink,
+  type RequestContext,
+  readRealmSettings,
+  systemClock,
+} from "@fin/identity";
+import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ADMIN_ORIGIN,
   accessFor,
-  type Browser,
+  Browser,
   createStaffHarness,
+  DOCS_ORIGIN,
   refusalOf,
   SoftAuthenticator,
   type StaffHarness,
   signInByCode,
+  staffRealmEnv,
   stepped,
   unique,
 } from "../test/harness.ts";
+import { STAFF_ACTIONS } from "./actions.ts";
 import type { StaffDeps } from "./deps.ts";
 import { addStaff, changeStaffRole, redeemCode, resetStaffFactors } from "./members.ts";
 import type { UnitTx } from "./ports.ts";
@@ -72,7 +85,10 @@ const resetFn =
     resetStaffFactors(
       h.deps,
       tx,
-      await requireStaff(h.realm, req, ctx, { permission: "staff.reset_factors" }),
+      await requireStaff(h.realm, req, ctx, {
+        permission: "staff.reset_factors",
+        changeLock: true,
+      }),
       staffId,
     );
 
@@ -184,6 +200,85 @@ async function assertionFrom(browser: Browser, authenticator: SoftAuthenticator)
 }
 
 /**
+ * A member enrolled with a passkey whose credential ID (which the authenticator picks) is 16
+ * decimal digits in base64url, so JSON can name it as a number too.
+ */
+async function enrolledWithDigitPasskey(label: string, roleKey: string): Promise<Member> {
+  const email = unique(label);
+  const { staffId, browser } = await h.pendingSession(email, roleKey);
+  const authenticator = new SoftAuthenticator(new URL(ADMIN_ORIGIN).hostname, ADMIN_ORIGIN);
+  // A leading 1 to 8 keeps the number below 2^53, so it survives JSON exactly.
+  let digits = String(1 + randomInt(8));
+  while (digits.length < 16) digits += String(randomInt(10));
+  const options = await browser.auth("GET", "/passkey/generate-register-options");
+  expect(options.status).toBe(200);
+  const response = authenticator.register(
+    options.json as { challenge: string; user: { id: string } },
+    { id: Buffer.from(digits, "base64url") },
+  );
+  expect(response.id).toBe(digits);
+  const verified = await browser.auth("POST", "/passkey/verify-registration", { response });
+  expect(verified.status, JSON.stringify(verified.json)).toBe(200);
+  return { staffId, email, browser, authenticator };
+}
+
+/** Asks a sign-in code for `email` from `browser` and returns it, unsent. */
+async function codeFor(browser: Browser, email: string): Promise<string> {
+  const sent = await browser.auth("POST", "/email-otp/send-verification-otp", {
+    email,
+    type: "sign-in",
+  });
+  expect(sent.status).toBe(200);
+  const code = await h.latestCode(email);
+  if (code === null) throw new Error("no code was queued");
+  return code;
+}
+
+/**
+ * A pool whose clients wait about `ms` (from none to twice that) before each statement, as a
+ * loaded server's would.
+ */
+function slowPool(pool: Pool, ms: number): Pool {
+  const slow = (client: PoolClient): PoolClient =>
+    new Proxy(client, {
+      get(target, key) {
+        if (key === "query") {
+          return async (...args: unknown[]) => {
+            await new Promise((resolve) => setTimeout(resolve, Math.random() * 2 * ms));
+            return (target.query as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  return { connect: async () => slow(await pool.connect()) } as unknown as Pool;
+}
+
+/**
+ * Two more staff realms on the same database with the same secrets, for many browsers at once:
+ * one to ask for challenges, and one to send assertions, whose statements run slowly, as on a
+ * loaded server, so that the assertions' transactions overlap without pause.
+ */
+function floodRealms() {
+  const env = staffRealmEnv();
+  const lines = new MemoryLineSink();
+  const realmOn = (pool: Pool) =>
+    createRealm({
+      settings: readRealmSettings("staff", env),
+      db: createPgDatabase({ pool, clock: systemClock, release: "test", lines }),
+      clock: systemClock,
+      lines,
+      docsOrigin: DOCS_ORIGIN,
+      actions: [STAFF_ACTIONS],
+    });
+  return {
+    asking: realmOn(h.login("fin_admin_a", 4)),
+    asserting: realmOn(slowPool(h.login("fin_admin_a", 10), 5)),
+  };
+}
+
+/**
  * Waits until `n` backends of this test's database wait for a lock another transaction holds, or
  * until `settles` (when given) has settled, whichever comes first.
  */
@@ -239,7 +334,10 @@ function heldReset(staffId: string, intent: string) {
     resetStaffFactors(
       deps,
       tx,
-      await requireStaff(h.realm, req, ctx, { permission: "staff.reset_factors" }),
+      await requireStaff(h.realm, req, ctx, {
+        permission: "staff.reset_factors",
+        changeLock: true,
+      }),
       staffId,
     ),
   );
@@ -575,13 +673,13 @@ describe("a reset while the member's own ceremony is in flight (§10.4, §11.4)"
     expect(await reaches(device)).toBe("unauthenticated");
   });
 
-  it("waits for a passkey sign-in that holds the member's row, then ends the session it made", async () => {
+  it("waits for a passkey sign-in that holds the member's ceremony lock, then ends the session it made", async () => {
     const target = await enrolled("reset.after", "viewer");
     const intent = await provedIntent(admin, target.staffId);
     const device = h.browser(accessFor(target.email));
     const response = await assertionFrom(device, target.authenticator);
     // Another transaction holds the member's passkey for a moment, so the sign-in stops at its
-    // counter, holding the member's row; the reset queues for that row meanwhile.
+    // counter, holding the member's ceremony lock; the reset queues for that lock meanwhile.
     const blocker = await h.platform.superuser();
     try {
       await blocker.query("BEGIN");
@@ -622,8 +720,9 @@ describe("a reset while the member's own ceremony is in flight (§10.4, §11.4)"
     const intent = await provedIntent(admin, target.staffId);
     const device = h.browser(accessFor(target.email));
     const response = await assertionFrom(device, target.authenticator);
-    // Another transaction holds the member's row for a moment: the reset queues for it first and
-    // the sign-in second, and both go on when it lets go.
+    // Another transaction holds the member's row for a moment: the reset, which has taken the
+    // member's ceremony lock, queues for the row, and the sign-in queues for the lock behind it;
+    // both go on when it lets go.
     const blocker = await h.platform.superuser();
     try {
       await blocker.query("BEGIN");
@@ -703,11 +802,159 @@ describe("a reset while the member's own ceremony is in flight (§10.4, §11.4)"
   });
 });
 
+describe("a reset while a sign-in of the member's is in flight, whatever its form (§10.4, §11.4)", () => {
+  it("leaves no session from a passkey sign-in that names its credential as a number", async () => {
+    const target = await enrolledWithDigitPasskey("reset.numeric", "operator");
+    const intent = await provedIntent(admin, target.staffId);
+    const device = h.browser(accessFor(target.email));
+    const asserted = await assertionFrom(device, target.authenticator);
+    // The same assertion with the credential ID as a JSON number, which the library would look up
+    // all the same.
+    const response = { ...asserted, id: Number(asserted.id), rawId: Number(asserted.rawId) };
+    const reset = heldReset(target.staffId, intent);
+    await reset.atNotice;
+    const signingIn = device.auth("POST", "/passkey/verify-authentication", { response });
+    signingIn.catch(() => undefined);
+    await lockWaiters(1, signingIn);
+    reset.release();
+    const [done, signIn] = await Promise.all([reset.done, signingIn]);
+
+    expect(done.status).toBe("pending");
+    expect(signIn.status).toBe(400);
+    expect(signIn.json).toMatchObject({ code: "invalid", fields: ["response.id"] });
+    expect(await holdings(target.staffId)).toMatchObject({
+      sessions: 0,
+      passkeys: 0,
+      liveCodes: 1,
+    });
+    expect(await reaches(device)).toBe("unauthenticated");
+  });
+
+  it("leaves no session from an emailed-code sign-in that waited for it: the code is void", async () => {
+    const target = await enrolled("reset.code.after", "viewer");
+    const intent = await provedIntent(admin, target.staffId);
+    const device = h.browser(accessFor(target.email));
+    const code = await codeFor(device, target.email);
+    const reset = heldReset(target.staffId, intent);
+    await reset.atNotice;
+    const signingIn = device.auth("POST", "/sign-in/email-otp", { email: target.email, otp: code });
+    signingIn.catch(() => undefined);
+    await lockWaiters(1, signingIn);
+    reset.release();
+    const [done, signIn] = await Promise.all([reset.done, signingIn]);
+
+    expect(done.status).toBe("pending");
+    expect(signIn.status).not.toBe(200);
+    expect(device.sessionToken()).toBeNull();
+    expect(await holdings(target.staffId)).toMatchObject({ sessions: 0, liveCodes: 1 });
+    // A new code signs the member in to enrol, and the reset's code enrols them.
+    const browser = h.browser(accessFor(target.email));
+    await signInByCode(h, browser, target.email);
+    expect(await redeemIn(browser, done.enrolmentCode.code)).toMatchObject({ ok: true });
+  });
+
+  it("waits for an emailed-code sign-in that holds the member, then ends the session it made", async () => {
+    const target = await enrolled("reset.code.first", "viewer");
+    const intent = await provedIntent(admin, target.staffId);
+    const device = h.browser(accessFor(target.email));
+    const code = await codeFor(device, target.email);
+    // Another transaction holds the code's row for a moment, so the sign-in stops there, holding
+    // the member; the reset queues meanwhile.
+    const blocker = await h.platform.superuser();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT 1 FROM staff.verification WHERE identifier = $1 FOR UPDATE", [
+        `sign-in-otp-${target.email}`,
+      ]);
+      const signingIn = device.auth("POST", "/sign-in/email-otp", {
+        email: target.email,
+        otp: code,
+      });
+      signingIn.catch(() => undefined);
+      await lockWaiters(1);
+      const resetting = h.route(
+        admin.browser,
+        { ...resetPath(target.staffId), intent },
+        resetFn(target.staffId),
+      );
+      resetting.catch(() => undefined);
+      await lockWaiters(2, resetting);
+      await blocker.query("ROLLBACK");
+      const [signIn, reset] = await Promise.allSettled([signingIn, resetting]);
+
+      expect(signIn).toMatchObject({ status: "fulfilled", value: { status: 200 } });
+      expect(reset).toMatchObject({ status: "fulfilled", value: { status: "pending" } });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+    expect(await holdings(target.staffId)).toMatchObject({ sessions: 0, liveCodes: 1 });
+    expect(await reaches(device)).toBe("unauthenticated");
+  });
+
+  it("is not kept out by forged assertions naming the member's passkey, however many are in flight", async () => {
+    const target = await enrolled("reset.flooded", "viewer");
+    const intent = await provedIntent(admin, target.staffId);
+    // Browsers on networks of their own, each with a challenge of its own, keep unsigned
+    // assertions naming the member's credential in flight (floodRealms says how).
+    const { asking, asserting } = floodRealms();
+    const deadline = Date.now() + 15_000;
+    let stop = false;
+    let sent = 0;
+    const loop = async () => {
+      await new Promise((resolve) => setTimeout(resolve, Math.random() * 100));
+      while (!stop && Date.now() < deadline) {
+        const access = accessFor(unique("flood"));
+        const asker = new Browser(asking, access);
+        const options = await asker.auth("GET", "/passkey/generate-authenticate-options");
+        const signed = target.authenticator.authenticate(String(options.json?.challenge), {
+          counter: 1000 + sent,
+        });
+        const response = signed.response as Record<string, unknown>;
+        const sender = new Browser(asserting, access);
+        for (const [name, value] of asker.jar) sender.jar.set(name, value);
+        await sender.auth("POST", "/passkey/verify-authentication", {
+          response: { ...signed, response: { ...response, signature: "AA" } },
+        });
+        sent += 1;
+      }
+    };
+    const loops = Array.from({ length: 20 }, () => loop());
+    try {
+      while (sent < 40 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const started = Date.now();
+      const done = (await h.route(
+        admin.browser,
+        { ...resetPath(target.staffId), intent },
+        resetFn(target.staffId),
+      )) as Awaited<ReturnType<typeof resetStaffFactors>>;
+      const waited = Date.now() - started;
+      const flooding = Date.now() < deadline;
+
+      // It waited only for the assertions queued before it, inside the logins' 5 s lock_timeout,
+      // while the flood went on.
+      expect(done.status).toBe("pending");
+      expect(flooding).toBe(true);
+      expect(waited).toBeLessThan(5000);
+    } finally {
+      stop = true;
+      await Promise.allSettled(loops);
+    }
+    expect(await holdings(target.staffId)).toMatchObject({
+      sessions: 0,
+      passkeys: 0,
+      liveCodes: 1,
+    });
+  }, 60_000);
+});
+
 describe("a staff change from the Admin's own browser while their own step-up is in flight (§10.8, §11.2)", () => {
-  // The step-up holds the Admin's row from its start and replaces their session at its end. The
-  // change reads that session first, which renews it once its renewal age has passed (§11.1), and
-  // holds the renewed row until it commits; so it must never wait on the Admin's own row after
-  // that, or each would wait on the other.
+  // The step-up holds the Admin's ceremony lock and row from its start and replaces their session
+  // at its end. The change reads that session first, which renews it once its renewal age has
+  // passed (§11.1), and holds the renewed row until it commits; so it must never wait on the
+  // Admin's own ceremony lock or row after that, or each would wait on the other.
   let actor: Member;
   let other: Member;
 
@@ -731,7 +978,7 @@ describe("a staff change from the Admin's own browser while their own step-up is
       changeStaffRole(
         h.deps,
         tx,
-        await requireStaff(h.realm, req, ctx, { permission: "staff.role" }),
+        await requireStaff(h.realm, req, ctx, { permission: "staff.role", changeLock: true }),
         actor.staffId,
         { roleKey: "viewer" },
       ),
@@ -743,10 +990,15 @@ describe("a staff change from the Admin's own browser while their own step-up is
       body: { email: actor.email, roleKey: "viewer" },
     },
     fn: async (tx, req, ctx) =>
-      addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
-        email: actor.email,
-        roleKey: "viewer",
-      }),
+      addStaff(
+        h.deps,
+        tx,
+        await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
+        {
+          email: actor.email,
+          roleKey: "viewer",
+        },
+      ),
   });
 
   it.each([
@@ -789,6 +1041,92 @@ describe("a staff change from the Admin's own browser while their own step-up is
       }
       // The step-up replaced the session the change read; the new one works.
       expect(await reaches(actor.browser)).toBe("none");
+    },
+  );
+});
+
+describe("two Admins changing each other at once, their sessions due for renewal (§10.8, §11.2)", () => {
+  // Each change's guard reads and renews its actor's session, and the renewed row stays locked
+  // until it commits. The change that waits for the staff-change lock must hold nothing then, or
+  // the first could not end the second's session while the second waits for the first.
+  interface Change {
+    request: { method: string; path: string; body?: unknown };
+    fn: RouteFn;
+  }
+  const demote = (staffId: string): Change => ({
+    request: { method: "PATCH", path: `/api/staff/${staffId}`, body: { roleKey: "viewer" } },
+    fn: async (tx, req, ctx) =>
+      changeStaffRole(
+        h.deps,
+        tx,
+        await requireStaff(h.realm, req, ctx, { permission: "staff.role", changeLock: true }),
+        staffId,
+        { roleKey: "viewer" },
+      ),
+  });
+  const resetOf = (staffId: string): Change => ({
+    request: resetPath(staffId),
+    fn: resetFn(staffId),
+  });
+
+  /** Asks for the change's intent and proves it in the Admin's browser. */
+  async function provedFor(who: Member, change: Change): Promise<string> {
+    const asked = await refusalOf(h.route(who.browser, change.request, change.fn));
+    expect(asked.code).toBe("step_up_required");
+    const intent = String(asked.extensions.intent_id);
+    expect((await h.prove(who.browser, who.authenticator, intent)).status).toBe(200);
+    return intent;
+  }
+
+  it.each([
+    ["A and B demote each other", (a: Member, b: Member) => [demote(b.staffId), demote(a.staffId)]],
+    [
+      "A resets B while B resets C",
+      (_a: Member, b: Member, c: Member) => [resetOf(b.staffId), resetOf(c.staffId)],
+    ],
+  ] as const)(
+    "%s: the first passes and the second is refused as signed out, never deadlocked",
+    async (_label, shape) => {
+      const a = await enrolled("both.a", "admin");
+      const b = await enrolled("both.b", "admin");
+      const c = await enrolled("both.c", "viewer");
+      const [forA, forB] = shape(a, b, c) as [Change, Change];
+      const intentA = await provedFor(a, forA);
+      const intentB = await provedFor(b, forB);
+      // Both sessions at their renewal age: a staff session is renewed after 5 of its 60 minutes.
+      for (const who of [a, b]) {
+        await h.fixture(
+          "UPDATE staff.session SET expires_at = now() + interval '3200 seconds' WHERE token = $1",
+          [who.browser.sessionToken()],
+        );
+      }
+      // Another transaction holds B's row for a moment, so A's change stops just after it has
+      // taken the staff-change lock; B's change is sent meanwhile.
+      const blocker = await h.platform.superuser();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query("SELECT 1 FROM staff.member WHERE id = $1 FOR UPDATE", [b.staffId]);
+        const first = h.route(a.browser, { ...forA.request, intent: intentA }, forA.fn);
+        first.catch(() => undefined);
+        await lockWaiters(1);
+        const second = h.route(b.browser, { ...forB.request, intent: intentB }, forB.fn);
+        second.catch(() => undefined);
+        await lockWaiters(2);
+        await blocker.query("ROLLBACK");
+        const [one, two] = await Promise.allSettled([first, second]);
+
+        expect(one.status).toBe("fulfilled");
+        expect(two.status).toBe("rejected");
+        // B's session ended with A's change before B's guard read it.
+        expect(((two as PromiseRejectedResult).reason as { code?: unknown }).code).toBe(
+          "unauthenticated",
+        );
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => undefined);
+        await blocker.end();
+      }
+      expect(await reaches(b.browser)).toBe("unauthenticated");
+      expect(await reaches(a.browser)).toBe("none");
     },
   );
 });

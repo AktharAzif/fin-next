@@ -1,10 +1,12 @@
 // Staff management (spec 02 §10.2, §8.5, §10.8, [SA-12] to [SA-15], [SA-29], [SA-32]): add, change a
 // role, remove, reset second factors, issue a new enrolment code. Each runs in the route's unit of
-// work, in this order (S2-31): the staff-change lock; the actor and the target read again; the
-// outrank, giving and last-Admin rules; only then the intent, spent in the same transaction as the
-// change, its audit event, its revocation-journal entry and its notices. A refusal writes nothing.
+// work, in this order (S2-31): the staff-change lock, which its guard took before it read the
+// actor's session (requireStaff's `changeLock`; lock.ts gives the whole order); the actor and the
+// target read again; the outrank, giving and last-Admin rules; only then the intent, spent in the
+// same transaction as the change, its audit event, its revocation-journal entry and its notices.
+// A refusal writes nothing.
 import { actingProblem, givingProblem, lastTopRoleProblem } from "@fin/access";
-import { AuthRefusal, redeemEnrolmentCode } from "@fin/identity";
+import { AuthRefusal, redeemEnrolmentCode, voidSignInCodes } from "@fin/identity";
 import {
   lowers,
   resolveStaffRole,
@@ -23,7 +25,7 @@ import {
   type MemberRow,
   memberForChange,
   otherActiveAdmins,
-  takeStaffChangeLock,
+  requireChangeLock,
 } from "./lock.ts";
 import type { UnitTx } from "./ports.ts";
 import type { StaffActor } from "./require-staff.ts";
@@ -43,9 +45,14 @@ function givingRefusal(problem: string): StaffRefusal {
  * rules then refuse a change aimed at oneself, and lock.ts says why the actor's row is never
  * locked).
  */
-async function targetForChange(tx: UnitTx, actor: ActorNow, staffId: string): Promise<MemberRow> {
+async function targetForChange(
+  tx: UnitTx,
+  actor: ActorNow,
+  staffId: string,
+  now: Date,
+): Promise<MemberRow> {
   if (staffId === actor.row.id) return actor.row;
-  const target = await memberForChange(tx, staffId);
+  const target = await memberForChange(tx, staffId, now);
   if (target === null || target.status === "removed") {
     throw new StaffRefusal("not_found", "staff.not_found");
   }
@@ -72,10 +79,17 @@ async function noticeEveryone(
   }
 }
 
+/**
+ * Ends every way in the member had or had begun: their sessions, their passkeys and authenticator,
+ * and the emailed sign-in codes already sent to them, so that no sign-in begun before the change
+ * finishes after it (their ceremonies wait for the change on their ceremony lock, lock.ts).
+ */
 async function endSessionsAndFactors(
   tx: UnitTx,
-  staffId: string,
+  target: MemberRow,
 ): Promise<{ sessionsEnded: number; factorsRemoved: number }> {
+  const staffId = target.id;
+  await voidSignInCodes(tx, "staff", target.email);
   const sessions = await tx.query("DELETE FROM staff.session WHERE user_id = $1", [staffId]);
   const passkeys = await tx.query("DELETE FROM staff.passkey WHERE user_id = $1", [staffId]);
   const authenticators = await tx.query(
@@ -108,7 +122,7 @@ export async function addStaff(
   input: { email: string; roleKey: string },
 ): Promise<AddedStaff> {
   const email = normaliseAddress(input.email);
-  await takeStaffChangeLock(tx);
+  requireChangeLock(who);
   const actor = await actorInsideLock(tx, who.staffId, "staff.add");
   const newRole = await resolveStaffRole(tx, input.roleKey);
   const giving = givingProblem(STAFF_CATALOGUE, {
@@ -191,9 +205,9 @@ export async function changeStaffRole(
   staffId: string,
   input: { roleKey: string },
 ): Promise<{ staffId: string; roleKey: string; roleLabel: string; sessionsEnded: number }> {
-  await takeStaffChangeLock(tx);
+  requireChangeLock(who);
   const actor = await actorInsideLock(tx, who.staffId, "staff.role");
-  const target = await targetForChange(tx, actor, staffId);
+  const target = await targetForChange(tx, actor, staffId, deps.clock.now());
   const current = await resolveStaffRole(tx, target.roleKey);
   const next = await resolveStaffRole(tx, input.roleKey);
   const giving = givingProblem(STAFF_CATALOGUE, {
@@ -256,15 +270,16 @@ export async function refuseLastActiveAdmin(
 }
 
 async function actingOn(
+  deps: StaffDeps,
   tx: UnitTx,
   who: StaffActor,
   staffId: string,
   permission: "staff.remove" | "staff.reset_factors" | "staff.add",
   lastAdmin: "remove" | "reset" | null,
 ): Promise<{ target: MemberRow; current: StaffRoleLookup }> {
-  await takeStaffChangeLock(tx);
+  requireChangeLock(who);
   const actor = await actorInsideLock(tx, who.staffId, permission);
-  const target = await targetForChange(tx, actor, staffId);
+  const target = await targetForChange(tx, actor, staffId, deps.clock.now());
   const current = await resolveStaffRole(tx, target.roleKey);
   const acting = actingProblem(STAFF_CATALOGUE, {
     actorPerms: actor.permissions,
@@ -287,10 +302,10 @@ export async function removeStaff(
   who: StaffActor,
   staffId: string,
 ): Promise<{ staffId: string; status: "removed"; sessionsEnded: number; factorsRemoved: number }> {
-  const { target } = await actingOn(tx, who, staffId, "staff.remove", "remove");
+  const { target } = await actingOn(deps, tx, who, staffId, "staff.remove", "remove");
   const stepUp = await who.stepUp(tx, { action: "staff.remove", target: target.id, body: {} });
   const now = deps.clock.now();
-  const counts = await endSessionsAndFactors(tx, target.id);
+  const counts = await endSessionsAndFactors(tx, target);
   await tx.query(
     `UPDATE staff.enrolment_code SET voided_at = $2
       WHERE member_id = $1 AND redeemed_at IS NULL AND voided_at IS NULL`,
@@ -331,7 +346,7 @@ export async function resetStaffFactors(
   who: StaffActor,
   staffId: string,
 ): Promise<{ staffId: string; status: "pending"; enrolmentCode: IssuedCode }> {
-  const { target } = await actingOn(tx, who, staffId, "staff.reset_factors", "reset");
+  const { target } = await actingOn(deps, tx, who, staffId, "staff.reset_factors", "reset");
   const stepUp = await who.stepUp(tx, {
     action: "staff.reset_factors",
     target: target.id,
@@ -339,7 +354,7 @@ export async function resetStaffFactors(
   });
   const now = deps.clock.now();
   const actor = { ...who.actor, stepUp };
-  const counts = await endSessionsAndFactors(tx, target.id);
+  const counts = await endSessionsAndFactors(tx, target);
   await deps.audit(tx, {
     event: "staff.factors_reset",
     actor,
@@ -378,7 +393,7 @@ export async function newEnrolmentCode(
   who: StaffActor,
   staffId: string,
 ): Promise<{ staffId: string; enrolmentCode: IssuedCode }> {
-  const { target } = await actingOn(tx, who, staffId, "staff.add", null);
+  const { target } = await actingOn(deps, tx, who, staffId, "staff.add", null);
   if (target.status !== "pending") {
     throw new StaffRefusal("conflict", "staff.not_pending", { reason: "not_pending" });
   }

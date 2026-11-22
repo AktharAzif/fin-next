@@ -3,17 +3,29 @@
 // roles again, so two concurrent demotions or removals of the last two active Admins cannot both
 // pass: the second waits for the first to commit and then counts what is left.
 //
-// Only the target's row is locked (`FOR UPDATE`, which waits for any of the target's factor
-// ceremonies in flight, §10.4). The actor's own row is read without a lock: by then the actor's
-// request has read and renewed their own session (requireStaff), and a ceremony of theirs in flight
-// holds their row while it waits to write that session, so a lock on it here would wait on that
-// ceremony while it waits on this change. No lock is needed: everything that can take a role or
-// an active status away takes the change lock first (the changes here and the operator's
-// bootstrap), so the row read inside it is the committed one, and enrolment only makes a pending
-// member active. A change aimed at the actor themselves is refused on that same read, before any
-// row is locked.
+// One lock order for every change, so that no two changes, and no change and ceremony, ever wait
+// on each other in a circle:
+//   1. the staff-change lock, before the guard reads the actor's session (requireStaff's
+//      `changeLock`). Reading the session renews it once its renewal age has passed (§11.1), and
+//      the renewed row stays locked until the change commits; a change that held it while it
+//      waited for another (two Admins acting on each other at once) would deadlock with that change
+//      ending it. Taken first, the lock is all a waiting change holds, and the second of the two
+//      then finds its own session ended by the first and is refused as signed out;
+//   2. the actor's session, renewed inside the lock, and the actor's row, read without a lock;
+//   3. the target's ceremony lock (@fin/identity's holdCeremonyLock), which every sign-in and
+//      factor ceremony of theirs takes before it holds their row: the change waits only for the
+//      ceremonies queued before it, never behind a stream of them, and none runs while it holds
+//      it (§10.4, §11.4);
+//   4. the target's row `FOR UPDATE`, then their sessions, factors and emailed codes.
+// The actor's own row and ceremony lock are never taken: a ceremony of theirs in flight holds both
+// while it waits to write the session this change renewed, so a wait on either would wait on that
+// ceremony while it waits on this change. No lock is needed: everything that can take a role or an
+// active status away takes the change lock first (the changes here and the operator's bootstrap),
+// so the row read inside it is the committed one, and enrolment only makes a pending member
+// active. A change aimed at the actor themselves is refused on that same read, before any row is
+// locked.
 import type { StaffPermission } from "@fin/access";
-import { AuthRefusal } from "@fin/identity";
+import { AuthRefusal, holdCeremonyLock } from "@fin/identity";
 import { resolveStaffRole, type StaffRoleLookup, staffPermissionsOf } from "./catalogue.ts";
 import type { Queryable } from "./ports.ts";
 
@@ -27,6 +39,11 @@ export interface MemberRow {
 export async function takeStaffChangeLock(tx: Queryable): Promise<void> {
   const result = await tx.query("SELECT 1 FROM staff.change_lock WHERE id = 1 FOR UPDATE");
   if (result.rowCount !== 1) throw new Error("staff.change_lock has no row");
+}
+
+/** Refuses to run a staff change whose guard did not take the staff-change lock first (step 1). */
+export function requireChangeLock(who: { changeLocked: boolean }): void {
+  if (!who.changeLocked) throw new Error("a staff change runs behind requireStaff's changeLock");
 }
 
 async function memberRow(
@@ -46,8 +63,19 @@ async function memberRow(
     : { id: row.id, email: row.email, roleKey: row.role_key, status: row.status };
 }
 
-/** A change's target's row, locked for the change. Never the actor's own (see above). */
-export function memberForChange(tx: Queryable, id: string): Promise<MemberRow | null> {
+/**
+ * A change's target's row, locked for the change after their ceremony lock (steps 3 and 4). Never
+ * the actor's own (see above). A removed member has no ceremony to wait for: their row is returned
+ * unlocked, for the change to refuse.
+ */
+export async function memberForChange(
+  tx: Queryable,
+  id: string,
+  now: Date,
+): Promise<MemberRow | null> {
+  const found = await memberRow(tx, id, "");
+  if (found === null || found.status === "removed") return found;
+  await holdCeremonyLock(tx, "staff", id, now);
   return memberRow(tx, id, " FOR UPDATE");
 }
 

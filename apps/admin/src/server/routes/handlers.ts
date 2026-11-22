@@ -48,7 +48,10 @@ function policyOf(id: PolicyId): AdminPolicy {
   return policy;
 }
 
-/** Runs a guarded route's work: requireStaff as the policy says, then `fn`, in one unit. */
+/**
+ * Runs a guarded route's work: requireStaff as the policy says (a staff change's guard takes the
+ * staff-change lock before it reads the session, §10.8), then `fn`, in one unit.
+ */
 function guarded<T>(
   realm: Realm,
   id: PolicyId,
@@ -57,11 +60,13 @@ function guarded<T>(
   const policy = policyOf(id);
   const permission = (policy.permission ?? undefined) as StaffPermission | undefined;
   const reach = policy.assurance === "aal1_allowed" ? (["pending"] as const) : (["ok"] as const);
+  const changeLock = "changeLock" in policy && policy.changeLock === true;
   return (args) =>
     realm.run(args.context, async (tx) => {
       const who = await requireStaff(realm, args.c.req.raw, args.context, {
         ...(permission === undefined ? {} : { permission }),
         reach,
+        changeLock,
         setCookies: args.setCookies,
       });
       return fn(tx, who, args);

@@ -47,6 +47,7 @@ export const STAFF_POLICIES = definePolicies([
     limits: ["step_up_intents"],
     audit: ["staff.member_added", "staff.enrolment_code_issued"],
     secret: true,
+    changeLock: true,
   },
   {
     id: "staff.role",
@@ -65,6 +66,7 @@ export const STAFF_POLICIES = definePolicies([
     limits: ["step_up_intents"],
     audit: ["staff.role_changed"],
     secret: false,
+    changeLock: true,
   },
   {
     id: "staff.remove",
@@ -83,6 +85,7 @@ export const STAFF_POLICIES = definePolicies([
     limits: ["step_up_intents"],
     audit: ["staff.member_removed"],
     secret: false,
+    changeLock: true,
   },
   {
     id: "staff.reset_factors",
@@ -101,6 +104,7 @@ export const STAFF_POLICIES = definePolicies([
     limits: ["step_up_intents"],
     audit: ["staff.factors_reset", "staff.enrolment_code_issued"],
     secret: true,
+    changeLock: true,
   },
   {
     id: "staff.enrolment_code",
@@ -119,6 +123,7 @@ export const STAFF_POLICIES = definePolicies([
     limits: ["step_up_intents"],
     audit: ["staff.enrolment_code_issued"],
     secret: true,
+    changeLock: true,
   },
   {
     id: "staff_roles.list",

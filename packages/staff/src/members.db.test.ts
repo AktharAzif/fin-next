@@ -55,10 +55,15 @@ const add = (who: Member, email: string, roleKey: string) =>
     who.authenticator,
     { method: "POST", path: "/api/staff" },
     async (tx, req, ctx) =>
-      addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
-        email,
-        roleKey,
-      }),
+      addStaff(
+        h.deps,
+        tx,
+        await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
+        {
+          email,
+          roleKey,
+        },
+      ),
   );
 
 const changeRole = (who: Member, staffId: string, roleKey: string) =>
@@ -71,7 +76,7 @@ const changeRole = (who: Member, staffId: string, roleKey: string) =>
       changeStaffRole(
         h.deps,
         tx,
-        await requireStaff(h.realm, req, ctx, { permission: "staff.role" }),
+        await requireStaff(h.realm, req, ctx, { permission: "staff.role", changeLock: true }),
         staffId,
         {
           roleKey,
@@ -89,7 +94,7 @@ const remove = (who: Member, staffId: string) =>
       removeStaff(
         h.deps,
         tx,
-        await requireStaff(h.realm, req, ctx, { permission: "staff.remove" }),
+        await requireStaff(h.realm, req, ctx, { permission: "staff.remove", changeLock: true }),
         staffId,
       ),
   );
@@ -104,7 +109,10 @@ const reset = (who: Member, staffId: string) =>
       resetStaffFactors(
         h.deps,
         tx,
-        await requireStaff(h.realm, req, ctx, { permission: "staff.reset_factors" }),
+        await requireStaff(h.realm, req, ctx, {
+          permission: "staff.reset_factors",
+          changeLock: true,
+        }),
         staffId,
       ),
   );
@@ -119,7 +127,7 @@ const reissue = (who: Member, staffId: string) =>
       newEnrolmentCode(
         h.deps,
         tx,
-        await requireStaff(h.realm, req, ctx, { permission: "staff.add" }),
+        await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
         staffId,
       ),
   );
@@ -225,10 +233,15 @@ describe("adding staff (§10.2)", () => {
     ]);
     const again = await refusalOf(
       h.route(admin.browser, { method: "POST", path: "/api/staff" }, async (tx, req, ctx) =>
-        addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
-          email: pending.toUpperCase(),
-          roleKey: "viewer",
-        }),
+        addStaff(
+          h.deps,
+          tx,
+          await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
+          {
+            email: pending.toUpperCase(),
+            roleKey: "viewer",
+          },
+        ),
       ),
     );
     expect(again.code).toBe("already_staff");
@@ -238,10 +251,15 @@ describe("adding staff (§10.2)", () => {
     ).toBe(intents);
     const self = await refusalOf(
       h.route(admin.browser, { method: "POST", path: "/api/staff" }, async (tx, req, ctx) =>
-        addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
-          email: admin.email,
-          roleKey: "viewer",
-        }),
+        addStaff(
+          h.deps,
+          tx,
+          await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
+          {
+            email: admin.email,
+            roleKey: "viewer",
+          },
+        ),
       ),
     );
     expect(self.code).toBe("already_staff");
@@ -271,10 +289,15 @@ describe("adding staff (§10.2)", () => {
     const attempt = (roleKey: string) =>
       refusalOf(
         h.route(adder.browser, { method: "POST", path: "/api/staff" }, async (tx, req, ctx) =>
-          addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
-            email: unique("given"),
-            roleKey,
-          }),
+          addStaff(
+            h.deps,
+            tx,
+            await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
+            {
+              email: unique("given"),
+              roleKey,
+            },
+          ),
         ),
       );
     expect(await attempt("admin")).toMatchObject({
@@ -303,10 +326,15 @@ describe("adding staff (§10.2)", () => {
     const plain = await enrolled("plain.viewer", "viewer");
     const forbidden = await refusalOf(
       h.route(plain.browser, { method: "POST", path: "/api/staff" }, async (tx, req, ctx) =>
-        addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
-          email: unique("x"),
-          roleKey: "viewer",
-        }),
+        addStaff(
+          h.deps,
+          tx,
+          await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
+          {
+            email: unique("x"),
+            roleKey: "viewer",
+          },
+        ),
       ),
     );
     expect(forbidden).toMatchObject({ code: "forbidden", extensions: { permission: "staff.add" } });
@@ -350,7 +378,7 @@ describe("changing a role (§10.2, S2-20)", () => {
             changeStaffRole(
               h.deps,
               tx,
-              await requireStaff(h.realm, req, ctx, { permission: "staff.role" }),
+              await requireStaff(h.realm, req, ctx, { permission: "staff.role", changeLock: true }),
               staffId,
               {
                 roleKey,
@@ -439,7 +467,10 @@ describe("removing staff (§10.2, [SA-32])", () => {
             removeStaff(
               h.deps,
               tx,
-              await requireStaff(h.realm, req, ctx, { permission: "staff.remove" }),
+              await requireStaff(h.realm, req, ctx, {
+                permission: "staff.remove",
+                changeLock: true,
+              }),
               staffId,
             ),
         ),
@@ -509,7 +540,7 @@ describe("resetting second factors (§10.2, [SA-14]) and new codes", () => {
           newEnrolmentCode(
             h.deps,
             tx,
-            await requireStaff(h.realm, req, ctx, { permission: "staff.add" }),
+            await requireStaff(h.realm, req, ctx, { permission: "staff.add", changeLock: true }),
             active.staffId,
           ),
       ),
@@ -528,7 +559,10 @@ describe("resetting second factors (§10.2, [SA-14]) and new codes", () => {
           resetStaffFactors(
             h.deps,
             tx,
-            await requireStaff(h.realm, req, ctx, { permission: "staff.reset_factors" }),
+            await requireStaff(h.realm, req, ctx, {
+              permission: "staff.reset_factors",
+              changeLock: true,
+            }),
             target.staffId,
           ),
       ),
@@ -552,7 +586,10 @@ describe("what a failure leaves (§16.1, §17.1)", () => {
           resetStaffFactors(
             h.deps,
             tx,
-            await requireStaff(h.realm, req, ctx, { permission: "staff.reset_factors" }),
+            await requireStaff(h.realm, req, ctx, {
+              permission: "staff.reset_factors",
+              changeLock: true,
+            }),
             target.staffId,
           ),
       );
@@ -569,7 +606,7 @@ describe("what a failure leaves (§16.1, §17.1)", () => {
           removeStaff(
             h.deps,
             tx,
-            await requireStaff(h.realm, req, ctx, { permission: "staff.remove" }),
+            await requireStaff(h.realm, req, ctx, { permission: "staff.remove", changeLock: true }),
             target.staffId,
           ),
       ),

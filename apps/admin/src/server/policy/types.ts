@@ -36,6 +36,11 @@ export interface RoutePolicy {
   readonly audit: readonly string[];
   /** The answer carries a secret shown once (an enrolment code): never replayed, never logged. */
   readonly secret: boolean;
+  /**
+   * A staff change (§10.8): the guard takes the staff-change lock before it reads the session, so
+   * the session it renews is renewed inside the lock (@fin/staff's lock.ts).
+   */
+  readonly changeLock?: true;
   /** Only on a GET that redeems a minted URL (§2.3); none on Fin Admin yet. */
   readonly fetchSite?: "same-origin-or-none";
 }
