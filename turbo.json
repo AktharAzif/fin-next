@@ -22,6 +22,6 @@
       "inputs": ["tsconfig.json", "vitest.config.ts", "scripts/**"],
       "outputs": []
     },
-    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] }
+    "//#test:root": { "cache": false, "env": ["FIN_JSTOK_FULL_CORPUS"] }
   }
 }
