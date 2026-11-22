@@ -19,8 +19,11 @@
 specifications, and between two specifications the one that owns the area, as README §8.3 lists
 the owners.
 
-1. The owner's decisions of 21 Nov 2026, which DECISIONS.md records and spec 01 §1 lists as OD-1 to
-   OD-6, override every other text.
+1. The owner's decisions of 21 Nov 2026, which DECISIONS.md records, override every other text: the
+   overnight ones, which spec 01 §1 lists as OD-1 to OD-6, and the answers of Saturday morning,
+   which spec 01 §1.2 lists (§0.3 names what each changes here). The decisions taken while the owner
+   was away, the build's [BD-01] to [BD-29] among them (BD-15 and BD-25 are withdrawn), are
+   register entries (item 2), for the owner's review.
 2. DECISIONS.md, appendix C included.
 3. ARCHITECTURE.md.
 4. EXECUTION.md.
@@ -48,14 +51,15 @@ it merges.
 | ID form | Meaning | Register |
 |---|---|---|
 | `[XX-nn]` | A decision | DECISIONS.md, the only register |
+| D6, in "moves to hardening (D6)" and "from hardening (D6)" | The owner's trim of Phase 0 on 21 Nov (§0.3): the builder account, the agents' own OS users, signed review receipts and the private overlay's ceremony move to hardening, before production. Not a research note, nor the 19 Nov plan's D6 | EXECUTION, "How to read this file"; spec 01 §1.2 |
 | `OD-n` | An owner decision of 21 Nov 2026, by spec 01's short name; DECISIONS.md records each in its overnight table | spec 01 §1 |
-| `D08-nn` | A decision this spec makes where the plan is silent | §14. D08-02, D08-32 and D08-34 are already settled in DECISIONS appendix C (SF-10, SF-01); the steward copies the rest into DECISIONS.md in the plan's first follow-up pull request |
+| `D08-nn` | A decision this spec makes where the plan is silent | §14. D08-02, D08-32 and D08-34 are already settled in DECISIONS appendix C (SF-10, SF-01); the steward copies the rest into DECISIONS.md in a later pull request of the plan |
 | `SF-nn` | A spec decision settled in the register before the first commit, folded or not adopted | DECISIONS appendix C |
 | `TM-nn`, `TM-Lnn` | A threat-model attacker profile, and a stated limit | §2; `docs/security/threat-model.json` |
 | `T08-nn` | A test this spec requires | §12 |
 | `A08-nn` | An acceptance criterion | §13 |
 | `PG-nn` | A production gate | EXECUTION §7.3. Production gates use `PG-` only; `G-` belongs to governance decisions |
-| `SP-nn`, `S-nn` | A spike | ARCHITECTURE §11.11 and EXECUTION §2.6 |
+| `SP-nn`, `S-nn` | A spike | ARCHITECTURE §11.11 and EXECUTION §2.6; each run's result in `docs/plan/spikes.md` |
 | `CR-nn` | A credential or account the owner provides | EXECUTION §0.3 and §2.9 |
 | `NB-nn` | A rule of the security bar that no cut line touches | EXECUTION §1.6 |
 | `H-nn` | A hardening workstream | EXECUTION §6 |
@@ -64,18 +68,24 @@ it merges.
 | Placeholder | Stands for |
 |---|---|
 | `<zone>` | A Fin zone in general; production's zones are [FD-10]'s |
-| `<staging-zone>` | The staging zone ([FD-09]) |
-| `<app>.<zone>` | A host, for example `console.<zone>` |
+| `<staging-zone>` | The staging zone ([FD-09]): the shared zone that the old product's staging also uses |
+| `<app>.<zone>` | A host by its role, for example `console.<zone>`. On staging each role has the name [FD-09] gives it: `admin.` is `staff.<staging-zone>`, `verify.` is `onboard.`, `developer.` is `docs.`, `api.` is `gateway.` and `db.` is `pg.`; `console.`, `selfie.`, `auth.` and `notify.` keep theirs |
 | `<env>` | `staging` or `production` (and `development`, `ci` where named) |
 | `<n>` | A key version number, starting at 1 |
 | `<tunnel id>`, `<account id>`, `<team>`, `<aud>` | Values that live only in Cloudflare, Railway, Better Stack or the private overlay, never in the repository |
 
-**Words.** *The overlay* is the private settings file given at the secure prompt ([G-09],
-[OB-13]); it holds every threshold, grace period, roster and zone name this spec refers to.
-*The secure prompt* is the only way a credential reaches a command. *A registered run* is a
-`pnpm fin` run written to the ops bucket before it changes anything (ARCHITECTURE §6.10). *A unit* is
-one unit of work: an HTTP request, one run of a duty, one queue item, one process event, one
-`pnpm fin` run, or one browser report (§7.2).
+**Words.** *The overlay* is the private settings file that [G-09] lists ([OB-13]); it holds every
+threshold, grace period, roster and zone name this spec refers to. Until hardening it is kept only
+on the build machines (machine A and machine B), outside every repository, where `pnpm fin` and the
+public-safety check read it; the ceremony (the owner giving it at the secure prompt, with its
+encryption and escrow) moves to hardening (D6). *The secure prompt* is the only way a credential
+reaches a command, except that until the owner is back `pnpm fin` reads the staging credentials the
+owner gave there at about 08:37 on 21 Nov, and the vault's ops and state writer tokens minted from
+them (CR-15), from their owner-only files on the build machine (§6.1, L1), wherever this spec takes
+a staging credential from the secure prompt. *A registered run* is a `pnpm fin` run written to the
+ops bucket before it changes anything (ARCHITECTURE §6.10).
+*A unit* is one unit of work: an HTTP request, one run of a duty, one queue item, one process event,
+one `pnpm fin` run, or one browser report (§7.2).
 
 ### 0.2 Requirements this spec touches
 
@@ -105,6 +115,24 @@ one unit of work: an HTTP request, one run of a duty, one queue item, one proces
 | OD-4 Cookies and CSRF | The origin gate's refusals are a monitored signal: one `csrf.refused` line per refusal with its reason and route pattern ([SA-44]), watched by `csrf-refused-jump` (ARCHITECTURE §10.8, spec 02 §18.2); cookie values are a scrubber shape |
 | OD-5 The UI SDK | No third-party origin at run time; the page policy has no nonce. `securitypolicyviolation` fails every browser test, and production reports reach `csp.report` lines |
 | OD-6 The edge toggle | Nothing here |
+
+The answers of Saturday morning (from about 08:25, build-clock times) and the decisions taken while
+the owner was away change these parts. DECISIONS.md records each, and its away-time log ("Decided
+while the owner was away") lists the steward's and the build's for the owner's review.
+
+| Decision | Who decided | What it changes here |
+|---|---|---|
+| [AU-01] and [OB-18] take their defaults at the Saturday sitting | The owner, about 08:25 ("defaults") | §3.1; §15, items 1 and 3 |
+| [FD-09]: staging lives on the shared staging zone, in the existing Cloudflare account, on new names | The owner, about 08:30. The staging names and the rules for the shared zone are the steward's, except the zone-rule writes ([BD-11]) and the DMARC records' policy and reports ([BD-17]), which are the build's | §0.1's placeholders; §2.5 (TM-L05, TM-L13); §7.8's `tunnel-config-drift`, `cloudflare-config-changed` and `email-setting-changed`; §7.12's staging filter; §8.5's static playbook |
+| The staging accounts exist and their credentials are in, given at the secure prompt at about 08:37 | The owner, about 08:30 ("they exist") and 08:37, and about 08:49 ("ok") for revoking the Railway workspace token on Mon 23 Nov. Keeping them on the build machine until the owner is back, each in an owner-only file, is the build's practice, for the owner's review ([SA-22]). Renewing the Cloudflare operator token before it expires on Thu 26 Nov is an owner step, recorded by the steward | §0.1's words; §2.5 (TM-L16); §6.1 (L1) and §6.2; §7.5 |
+| Phase 0 is trimmed: the builder account, the agents' own OS users, signed review receipts and the private overlay's ceremony move to hardening (D6) | The owner, about 08:25 ("yes"). [G-10]'s interim merge rule and keeping the private settings on the build machines are the steward's | §0.1's words; §2.2 to §2.4; §2.5 (TM-L15); §6.1, §6.2, §6.4 and §6.6 |
+| fin-review runs locally as the merge gate until CI has an Anthropic credential | The owner, about 08:49 ("fine for now") | §2.3, §2.4 |
+| Fin Admin's first staff admin on staging is the owner's staff address, never written here | The owner, about 08:49. Keeping its two TOTP secrets (Fin Admin's and Access's own factor) on the build machine and the staging-only mailbox rule are the steward's | §2.5 (TM-L14); §6.1 (L4) |
+| The build's [BD-02], [BD-05], [BD-07], [BD-11], [BD-13], [BD-14], [BD-16] and [BD-17] | The build, under the owner's away-time authority, for the owner's review | §2.3, §2.4, §6.1, §6.2, §6.4, §6.6, §7.5, §7.8 and §8.5 |
+| The build's [BD-24]: staging's Better Stack sources and Errors applications are in `us_west`, the only region the organisation offers, and staging's DSN check takes the `us_west` shape | The build, under the owner's away-time authority, for the owner's review; it departs from the owner's [OB-02], so that review covers it too | §7.1, §7.5 |
+
+S-01 (SP-25) passed on 21 Nov (`docs/plan/spikes.md`), so §7.6's monitors follow its result and
+the per-app API hosts stay only as the documented fallback.
 
 ---
 
@@ -198,7 +226,7 @@ one unit of work: an HTTP request, one run of a duty, one queue item, one proces
 | AS-5 | The audit trail and the ledger's integrity | The record of who did what | §3 |
 | AS-6 | Page integrity: the static files every browser runs | A changed page can steal every credential typed into it | ARCH §5.16; NB-14 |
 | AS-7 | Availability: sign-in codes, hosted pages, payouts | Developers' customers are blocked | §7; ARCH §15 |
-| AS-8 | Review integrity: the gate, receipts, rules files | A weakened gate lets every other control be removed | ARCH §11.1, §11.6 |
+| AS-8 | Review integrity: the gate, fin-review's recorded runs (signed receipts from hardening, D6), the rules files | A weakened gate lets every other control be removed | ARCH §11.1, §11.6 |
 
 ### 2.3 Trust boundaries
 
@@ -211,10 +239,10 @@ one unit of work: an HTTP request, one run of a duty, one queue item, one proces
 | Service to Postgres | Every query | One group role per service; grant matrix; checked functions; audit guard (ARCH §6.3, §8.2) | `grants-drift`, `audit-guard`, `privileged-login` |
 | Service to a provider | Outbound calls | Static egress allowlisted at the provider; host allowlists in each adapter; `deliveryFetch` for URLs a person supplied | `provider-auth-failing`, `sumsub-failing` |
 | Operator to a platform | Every change | The secure prompt, registered runs, short-lived tokens | `deploy-outside-window`, `cloudflare-config-changed`, `github-settings-changed` |
-| CI to staging | Deploys | The `staging` and `staging-static` environments with the owner's approval | `deploy-outside-window`, `static-deployment-changed` |
-| Builders to the repository | Merges | Ruleset, signed receipts, control paths ([CI-01], [CI-11], [CI-14]) | `github-settings-changed` |
+| The operator machine or CI to staging | Deploys | Until the owner is back, `pnpm fin` from the operator machine, with registered runs and attested artefacts ([BD-05]); then the `staging` and `staging-static` environments, with the owner's approval ([CI-03]) | `deploy-outside-window`, `static-deployment-changed` |
+| Builders to the repository | Merges | The ruleset (0 approvals and no code-owner review until hardening, [BD-02]); fin-review's recorded local run on the exact head until hardening ([G-10]), signed receipts from then (D6); control paths, whose owner approval GitHub enforces from hardening, with the review cadence and the away-time log standing in until then ([BD-02]) ([CI-01], [CI-11], [CI-14]) | `github-settings-changed` |
 | Page to browser | Every document | `_headers` page policy, same origin, no third-party script (ARCH §7.12) | `csp.report` lines, the browser tests |
-| Cloudflare static assets | Every file | Assets-only deployments; the static deploy token in one environment | `static-deployment-changed` |
+| Cloudflare static assets | Every file | Assets-only deployments; the static deploy token used only by `tools/static-deploy` ([BD-16]), and kept in one GitHub environment of its own once the environments exist ([BD-05]) | `static-deployment-changed` |
 
 ### 2.4 Attacker profiles
 
@@ -245,9 +273,9 @@ attack pass of fin-review draws its profiles from this table and EXECUTION §1.7
 | TM-20 | A Sandbox key holder on the docs page | Try it on Sandbox keys only, five layers (spec 05 §9) | `docs-failing` | spec 05 §13 |
 | TM-21 | A holder of the static deploy token, or a Cloudflare member, who attaches a Worker or replaces a page | Assets-only invariant; routes exact; watcher every minute; manifest hash equal to the release's (NB-14) | `static-deployment-changed` | A08-21 |
 | TM-22 | The supply chain and the operator's machine | pnpm policy, pinned actions and images, attestations, the operator user with no agent (ARCH §7.13) | `github-settings-changed` | spec 01 §13 |
-| TM-23 | A steered builder agent | Lane ownership, receipts, control paths, the merge guard ([CI-13], [CI-14]) | `github-settings-changed` | AC-P0-13 |
+| TM-23 | A steered builder agent | Lane ownership; the ruleset (no push to `main`, merge commits only, no bypass actors); fin-review's recorded local run on the exact head ([G-10]); control paths, whose owner approval GitHub enforces from hardening, with the review cadence standing in until then ([BD-02]); no merge guard in Phase 0 ([BD-07]). Until hardening agents work with the owner's login: the builder account, signed receipts and the agents' own OS users come from hardening (D6) ([CI-11], [CI-13], [CI-14]) | `github-settings-changed` | AC-P0-13 (its builder-token half from hardening, D6) |
 | TM-24 | Content a reviewer reads (prompt injection) | Review isolation and finding validation ([RV-21]) | fin-review's self-test | EXECUTION §2.4 |
-| TM-25 | The CI pipeline attacker, including the staging deploy job | No secret in pull-request jobs; protected environments; owner approval ([CI-03]) | `deploy-outside-window` | AC-P0-30, AC-P0-31 |
+| TM-25 | The CI pipeline attacker, including the staging deploy job | No secret in pull-request jobs; protected environments; owner approval ([CI-03]). Until the owner is back no CI job holds a deploy secret: staging deploys run from the operator machine ([BD-05]) | `deploy-outside-window` | AC-P0-30, AC-P0-31 |
 | TM-26 | A cost attacker: ingest, email, calls | Load shedding; per-replica caps on browser reports; spending alerts at 80% | `telemetry-gaps`, `email-volume-high`, `load-shedding` | T08-31 |
 | TM-27 | A stranger planting data in Better Stack through the report endpoints | Parse, scrub, cap; notify-only alerts above a volume ([SA-42]) | `browser-reports-lost` | T08-30 |
 | TM-28 | Someone rewriting history: deleting or editing audit rows | Append-only triggers; `audit.record()` only; the chain; outside anchors; the watcher's vault inventory | `audit-chain-broken`, `audit-head-moved-back`, `vault-inventory-changed` | T08-05 to T08-12 |
@@ -265,13 +293,17 @@ never reports them as new.
 | TM-L02 | Code inside the edge can act as any key whose record it reads; `payments` re-reads keys and money keys carry allowlists | [SA-36], [MO-20] |
 | TM-L03 | The HA superuser's password lives in the cluster's own variables | [P-18] |
 | TM-L04 | A GitHub Actions log is public; nothing secret may be printed, and the overlay is masked value by value wherever `pnpm fin` reads it | [CI-03], spec 01 §9.2 |
-| TM-L05 | Staging's watcher and vault live in the staging Cloudflare account | [OB-11], [DA-09] |
+| TM-L05 | Staging's watcher and vault live in the staging Cloudflare account, the existing account that the old product's staging also uses ([FD-09]) | [OB-11], [DA-09], [FD-09] |
 | TM-L06 | One vendor holds the logs and the pager; liveness also rides on monitors, heartbeats and the watcher | [OB-01], ARCH §10.12 |
 | TM-L07 | An R2 bucket lock can be lifted by whoever edits the bucket, probably without an audit entry; the watcher's inventory is the control | [DA-09] |
 | TM-L08 | Email Sending is a beta with no support duty; its token can also edit suppressions | [EM-02] |
 | TM-L09 | Railway's October 2026 breach exposed customers' variables, sealed ones included; every design here assumes variables leak | ARCH §1 principle 3 |
 | TM-L10 | A direct misuse of a leaked service login that the audit guard refuses leaves an error in Postgres's own log, not a Better Stack line; the refusal itself is the control | D08-05 |
 | TM-L11, TM-L12 | Two limits on paging and responders, with the owner's availability, kept in the threat model's private annex in the overlay ([G-09]); a reviewer reads them there | [OB-06], D08-24 |
+| TM-L13 | Staging shares its zone and Cloudflare account with the old product's staging. The old product's Cloudflare credentials could change fin-next's staging DNS, routes and Access, and reach its account-level objects (tunnels, Workers scripts, R2 vault buckets, the tokens it minted; [DA-09]), and every host on the zone is same-site with every other, old and new; fin-next's cookies are host-only `__Host-`. Test data only; the zone-level risk is accepted until the cutover, and the account-level reach is for the owner to decide (DECISIONS, the away-time section) | [FD-09], [DA-09] |
+| TM-L14 | On staging the first staff admin's two TOTP secrets, Fin Admin's and Access's own factor, are kept on the build machine, each in a local secret file outside every repository, never printed, logged or in CI, and agents may read that admin's mailbox for its Fin and Cloudflare sign-in emails (codes and links) and nothing else. So a steered agent can pass Access and sign in to Fin Admin on staging as that admin. Test data only. In production no agent holds any staff member's factor | [G-10] (staging only), [SA-04], [FD-05] |
+| TM-L15 | Until hardening (D6) agents work with the owner's GitHub login, which can push workflow changes, merge, approve the staging environment and edit the ruleset. The review engine runs as the same OS user as the builders, so the spool is a queue, not a boundary, and no receipt is signed. The ruleset with no bypass actors, [G-10]'s interim merge rule, and [BD-02]'s review cadence and away-time log stand in | [CI-13], [CI-11], [G-10], [BD-02] |
+| TM-L16 | Until the owner is back, the staging credentials the owner gave at the secure prompt at about 08:37 on 21 Nov, and the vault's ops and state writer tokens minted from them (CR-15), are kept on the build machine, each in an owner-only file readable by the user the agents' sessions run as, outside every repository, never printed, logged or in CI. So a steered agent could use them outside `pnpm fin`, whose allow-list then does not bind, and the Cloudflare operator token's zone and account permissions also reach the old product's resources on the shared account (EXECUTION §0.3, CR-05). They are staging and sandbox credentials only; the operator token expires on Thu 26 Nov, and the owner revokes the Railway workspace token on Mon 23 Nov | [SA-22], [FD-09] |
 
 ---
 
@@ -282,8 +314,8 @@ never reports them as new.
 R9 is read as [AU-01] reads it (ARCHITECTURE §8.1): an audit row for every write by any actor, every
 reveal of personal data, documents or bank numbers, every sign-in, sign-out and session change, every
 change to a sign-in method, and every important action in AGENTS terms; and an outside record of the
-operator's database sessions and the platforms' own changes. [AU-01] is still the owner's to confirm;
-its default is built.
+operator's database sessions and the platforms' own changes. The owner decided [AU-01] at its
+default at the Saturday sitting (21 Nov, about 08:25, "defaults"), and that default is built.
 
 | Kind of action | Audit row | Log line | Where |
 |---|---|---|---|
@@ -1059,11 +1091,11 @@ to Sumsub. Recorded as an open item for counsel (§15).
 
 | Level | What | Held | Lifetime |
 |---|---|---|---|
-| L0, roots | The escrow `age` identity per environment ([DA-10]: staging in the owner's password manager with a printed copy; production on two hardware keys and a sealed printed copy); the owner's logins to GitHub, each Cloudflare account (staging, production, vault, watch), Railway, Better Stack, Sumsub, MassPay and the identity provider, each with security keys; the receipt-signing private keys in each machine's `fin-review` keychain | offline, or the owner's own devices; never online at Fin | years; rotated on suspicion |
-| L1, operator credentials | The Railway project token, the Cloudflare operator token, the static deploy token, the Better Stack team tokens, the R2 bucket-administration token, the watcher's read-only tokens, the builder account's tokens | minted short-lived and typed into the secure prompt per run; never stored by Fin. Exceptions: staging's Railway project token, static deploy token and Better Stack Telemetry token in protected GitHub environments ([CI-03]); the watcher's read-only tokens in the watcher's own secrets | 24 hours (Cloudflare operator) to 90 days |
-| L2, service secrets | Every family of §6.2 held by a service | sealed Railway variables on the one service that needs each, escrowed first | per §6.2 |
+| L0, roots | The escrow `age` identity per environment ([DA-10]: staging's will be in the owner's password manager with a printed copy once the owner gives its recipient, CR-10; until then staging has no escrow ([BD-14]); production on two hardware keys and a sealed printed copy); the owner's logins to GitHub, each Cloudflare account (staging, production, vault, watch), Railway, Better Stack, Sumsub, MassPay and the identity provider, each with security keys; from hardening (D6), the receipt-signing private keys in each machine's `fin-review` keychain; until hardening (D6) the agents' sessions on both machines also work with the owner's GitHub login (ARCHITECTURE §7.8, §11.1; TM-L15) | offline, or the owner's own devices; never online at Fin | years; rotated on suspicion |
+| L1, operator credentials | The Railway project token, the Cloudflare operator token, the static deploy token, the Better Stack team tokens, the R2 bucket-administration token, the watcher's read-only tokens, the builder account's tokens (from hardening, D6) | minted short-lived and typed into the secure prompt per run; never stored by Fin. Exceptions: until the owner is back, the staging operator credentials the owner gave at the secure prompt at about 08:37 on 21 Nov, and the operator's writer tokens for the vault's ops and state buckets minted from them (CR-15), each in an owner-only file on the build machine, outside every repository, never printed and never in CI, and read by `pnpm fin` per run ([SA-22], ARCHITECTURE §7.8, TM-L16); staging's Railway project token, static deploy token and Better Stack Telemetry token in protected GitHub environments ([CI-03]), once those exist, when the owner is back ([BD-05]); the watcher's read-only tokens in the watcher's own secrets | 24 hours (Cloudflare operator; the staging token given on 21 Nov expires on Thu 26 Nov, and the owner renews it before then) to 90 days |
+| L2, service secrets | Every family of §6.2 held by a service | sealed Railway variables on the one service that needs each, escrowed first (on staging once CR-10 is given; until then not escrowed and regenerated if lost, [BD-14]) | per §6.2 |
 | L3, derived keys | HKDF-SHA256 subkeys of the seal and index keys, per organisation and use (ARCHITECTURE §6.6) | computed in memory per call; never stored | as their parent |
-| L4, data secrets | Webhook endpoint secrets (sealed under the seal key in `events`); TOTP secrets and backup codes (encrypted under `BETTER_AUTH_SECRETS`); API key hashes (HMAC under the pepper); enrolment codes and one-time codes (hashed) | Postgres columns | per object |
+| L4, data secrets | Webhook endpoint secrets (sealed under the seal key in `events`); TOTP secrets and backup codes (encrypted under `BETTER_AUTH_SECRETS`); API key hashes (HMAC under the pepper); enrolment codes and one-time codes (hashed) | Postgres columns; on staging only, the first staff admin's two TOTP secrets, Fin Admin's and Access's own factor, are also held in local secret files on the build machine, outside every repository, never printed or logged and never in CI ([SA-04], [FD-05], TM-L14); in production no agent holds any staff member's factor | per object |
 
 **One rule for every L2 family** ([SA-22], ARCHITECTURE §4.9, §7.8): generate with `pnpm fin` (32
 random bytes from `crypto.randomBytes` unless the issuer makes it), encrypt to every escrow recipient,
@@ -1071,7 +1103,9 @@ upload `escrow/<family>/<environment>-<version>.age` write-once to `fin-next-<en
 ciphertext to the owner's password manager, and only then set the sealed variable. Rotation follows
 "escrow first, then Railway, then verify, then revoke the old value". No secret appears in the
 repository, an image, a static build, a build argument, a log, an event, an error report, a pull
-request or a workflow log (NB-08).
+request or a workflow log (NB-08). On staging the escrow steps wait for CR-10 ([BD-14]). Until the
+owner gives the staging recipient, a staging value is generated and set as a sealed variable with no
+escrow copy, and is regenerated if lost.
 
 **Versioned families.** A family that keeps more than one version is written `<FAMILY>_<n>` with
 `<FAMILY>_IN_USE=<n>`. Readers accept every version present; writers use `IN_USE`; a boot with
@@ -1099,7 +1133,7 @@ runbook. "Deploys" counts the Railway deploys one routine rotation needs.
 | `sumsub-webhook-secret` | `SUMSUB_WEBHOOK_SECRETS` | api | JSON array of active secrets | 180 days | `rotate-sumsub.md` (webhook section) | 2 |
 | `masspay-key` | `MASSPAY_API_KEY` | payments | issued by MassPay | 180 days, or MassPay's terms | `rotate-masspay.md` (spec 04 §18.3) | 1 or 2 (SP-13) |
 | `masspay-webhook-secret` | `MASSPAY_WEBHOOK_SECRETS` | payments | JSON array | 180 days | `rotate-masspay.md` | 2 |
-| `email-token` | `FIN_EMAIL_TOKEN` | worker | Cloudflare `cfat_` token, Email Sending Edit, IP-filtered | 180 days or less | `rotate-email-token.md` | 1 |
+| `email-token` | `FIN_EMAIL_TOKEN` | worker | Cloudflare `cfat_` token, Email Sending Edit (Cloudflare's token page names this group Email Sending Write: [BD-28]; `docs/plan/spikes.md`, run 5), IP-filtered | 180 days or less | `rotate-email-token.md` | 1 |
 | `vault-token` | `FIN_VAULT_AUDIT_*` (worker), `FIN_VAULT_BACKUPS_*` (backup) | as named | R2 token scoped to one bucket | 180 days, staggered | `rotate-r2.md` | 1 |
 | `telemetry-token` | `FIN_TELEMETRY_TOKEN` | every Fin service, its own source | issued by Better Stack | on suspicion | `rotate-betterstack.md` | 1 |
 | `errors-dsn` | `FIN_ERRORS_DSN` (server), `FIN_BROWSER_ERRORS_DSN` (each app's API service, for its relay) | each service its own | issued by Better Stack | on suspicion | `rotate-betterstack.md` | 1 |
@@ -1107,15 +1141,15 @@ runbook. "Deploys" counts the Railway deploys one routine rotation needs.
 | `db-login` | `FIN_DB_USER`, `FIN_DB_PASSWORD` | each service with a login, its own | SCRAM verifier set by a registered task; 32 bytes base64url | 180 days | `rotate-db-login.md` | 1, then disable the old login |
 | `turnstile-secret` (if adopted) | `FIN_TURNSTILE_SECRET` | console, admin, verify | issued by Cloudflare | yearly | `rotate-turnstile.md` | 1 |
 | `google-client-secret` (if built) | `FIN_GOOGLE_CLIENT_SECRET` | console (admin if enabled) | issued by Google | yearly | `rotate-google.md` | 1 |
-| `static-deploy-token` | `CF_STATIC_DEPLOY_TOKEN` | the `staging-static` GitHub environment; production's depends on the owner's open answer to [FD-19]: at the secure prompt only under the default put to the owner (the operator's launcher), or a `production` GitHub environment under the other answer | Cloudflare token, Workers Scripts Edit only | 90 days | `rotate-static-deploy-token.md` | none |
-| `railway-project-token` | `RAILWAY_TOKEN` | the `staging` GitHub environment; production's at the secure prompt only | issued by Railway | 90 days | `rotate-railway-token.md` | none |
-| `betterstack-ci-token` | `BETTERSTACK_TELEMETRY_TOKEN` | the `staging` GitHub environment | team Telemetry token | 90 days | `rotate-betterstack.md` (CI section) | none |
+| `static-deploy-token` | `CF_STATIC_DEPLOY_TOKEN` | the `staging-static` GitHub environment, once it exists, when the owner is back ([BD-05]); until then it is not minted, and each staging upload uses a one-run static token (spec 01 §6.9); production's depends on the owner's open answer to [FD-19]: at the secure prompt only under the default put to the owner (the operator's launcher), or a `production` GitHub environment under the other answer | Cloudflare token, Workers Scripts Edit only | 90 days | `rotate-static-deploy-token.md` | none |
+| `railway-project-token` | `RAILWAY_TOKEN` | the `staging` GitHub environment, once it exists, when the owner is back ([BD-05]), and until then an owner-only file on the build machine (§6.1, L1); production's at the secure prompt only | issued by Railway | 90 days | `rotate-railway-token.md` | none |
+| `betterstack-ci-token` | `BETTERSTACK_TELEMETRY_TOKEN` | the `staging` GitHub environment, once it exists, when the owner is back ([BD-05]), and until then an owner-only file on the build machine (§6.1, L1) | team Telemetry token | 90 days | `rotate-betterstack.md` (CI section) | none |
 | `watcher-tokens` | the watcher's secrets (CR-18) | the watcher | read-only tokens | yearly | `rotate-watcher-tokens.md` | a watcher upload |
-| `receipt-signing-key` | the `fin-review` keychain; public half in `docs/review/receipt-keys/` | each machine | Ed25519 | yearly, or on suspicion | `rotate-receipt-key.md` | none (a control-path pull request) |
+| `receipt-signing-key` (from hardening, D6) | the `fin-review` keychain; public half in `docs/review/receipt-keys/` | each machine | Ed25519 | yearly, or on suspicion | `rotate-receipt-key.md` | none (a control-path pull request) |
 | `canary-key` | Better Stack monitor secret of `api-canary` | Better Stack | a restricted Sandbox Fin key | 90 days | `rotate-canary-key.md` | none |
-| `monitor-header` | Better Stack monitors' secret header; the WAF skip rule | Better Stack, Cloudflare | 32 bytes | yearly | `rotate-monitor-header.md` | none |
+| `monitor-header` | Better Stack monitors' secret header; the WAF skip rule (production only: the shared staging zone has no custom rule left for it, §8.6) | Better Stack, Cloudflare | 32 bytes | yearly | `rotate-monitor-header.md` | none |
 | `postgres-superuser` | the template's variables | the database service | Railway's Regenerate only ([P-18]) | on suspicion | `rotate-superuser.md` | Railway's own |
-| `escrow-recipient` | `age` recipients in the public settings | the settings file | `age` X25519 | on suspicion; the drill recipient after each drill ([DA-15]) | `rotate-escrow-recipient.md` | none |
+| `escrow-recipient` | `age` recipients in the public settings (staging's once the owner gives it, CR-10, [BD-14]) | the settings file | `age` X25519 | on suspicion; the drill recipient after each drill ([DA-15]) | `rotate-escrow-recipient.md` | none |
 
 Webhook endpoint secrets are rolled by developers, and by Fin when a member who saw one leaves
 ([SA-33]); they are not an operator family. `fin_owner` has no standing password: each registered run
@@ -1159,13 +1193,13 @@ are what each file says.
 | `sumsub-token` | 1. the owner creates a new token in Sumsub with the same permissions and IP allowlist; 2. set it on the holder, deploy; 3. a read with the new token; 4. disable the old token in Sumsub | no `sumsub-failing`; `provider.call` OK | re-enable the old token | disable the old token at Sumsub at once if leaked; Sumsub calls fail until Railway returns |
 | `sumsub-webhook-secret` | 1. add the new secret to `SUMSUB_WEBHOOK_SECRETS` on api, deploy; 2. change it in Sumsub; 3. after 24 hours remove the old one, deploy | no `sumsub.webhook_refused` | keep both | the poll covers missed events (spec 03 §7.3) |
 | `masspay-key`, `masspay-webhook-secret` | spec 04 §18.3; overlap as SP-13 records | `provider.call` OK; no `money.webhook_refused` | as spec 04 | trip `live_money` first; the status sweep covers events |
-| `email-token` | 1. `pnpm fin email token <env>` mints a new token (Email Sending Edit, IP filter to worker's egress, expiry 180 days or less); 2. set `FIN_EMAIL_TOKEN`, deploy worker; 3. the delivery check sends (`email.sent` with `ops/delivery-check`); 4. revoke the old token | the seed inbox receives the check | redeploy with the old token until it is revoked | if leaked, revoke at once: email stops until Railway returns |
+| `email-token` | 1. `pnpm fin email token <env>` mints a new token (Email Sending Edit, the group Cloudflare's token page names Email Sending Write ([BD-28]; `docs/plan/spikes.md`, run 5), IP filter to worker's egress, expiry 180 days or less); 2. set `FIN_EMAIL_TOKEN`, deploy worker; 3. the delivery check sends (`email.sent` with `ops/delivery-check`); 4. revoke the old token | the seed inbox receives the check | redeploy with the old token until it is revoked | if leaked, revoke at once: email stops until Railway returns |
 | `vault-token` | 1. mint a new token scoped to the one bucket; 2. set it, deploy the holder; 3. the next anchor or dump lands; 4. revoke the old | `audit.anchor` rows grow; the next `backup-hourly` pings | keep the old until verified | revoke on a leak; anchors and dumps stop until Railway returns (`audit-anchor-failing` pages) |
 | `telemetry-token`, `errors-dsn` | 1. `pnpm fin monitoring rotate-source <env> <service>` makes a new source or application token (if Better Stack cannot regenerate one, a new source with the same settings; UNVERIFIED, SP-06); 2. set it, deploy; 3. lines arrive; 4. revoke or pause the old | `no-logs-<service>` clear | the old token until revoked | lines stay on stdout only |
 | `heartbeat-url` | 1. create a new heartbeat with the same settings; 2. set the variable, deploy; 3. it pings; 4. pause the old one with a recorded reason ([OB-16]) | the new heartbeat is up | the old is only paused | wait |
 | `db-login` | 1. a registered task sets a new password on the idle login (`fin_api_b`) with `VALID UNTIL` the next cadence plus 30 days; 2. set `FIN_DB_USER` and `FIN_DB_PASSWORD` to it, deploy; 3. `/readyz` and a query; 4. after draining, `ALTER ROLE fin_api_a NOLOGIN`; the next rotation goes back to `_a` ([P-20]) | `pg_stat_activity` shows only `_b` | set the variables back; the old login still works until step 4 | the old login keeps working |
-| `static-deploy-token`, `railway-project-token`, `betterstack-ci-token` | 1. mint a new token with the same scope; 2. replace the GitHub environment secret (the owner); 3. a dry-run deploy proves it; 4. revoke the old | the dry run | the old until revoked | not affected (they live in GitHub) |
-| `receipt-signing-key` | 1. a new Ed25519 pair in the `fin-review` keychain; 2. a control-path pull request adds the public half to `docs/review/receipt-keys/` (owner's approval); 3. receipts switch; 4. after open pull requests are re-receipted, remove the old public key | `gate` accepts a new receipt | keep both public keys | not affected |
+| `static-deploy-token`, `railway-project-token`, `betterstack-ci-token` | 1. mint a new token with the same scope; 2. once the GitHub environments exist ([BD-05]), the owner replaces the environment secret. Until then the static deploy token does not exist (each upload uses a one-run static token that `pnpm fin` mints with the operator token and revokes after the run, spec 01 §6.9), and a new Railway project token or CI Telemetry token is given at the operator machine's secure prompt; 3. a dry-run deploy proves it; 4. revoke the old | the dry run | the old until revoked | not affected (none is held on Railway) |
+| `receipt-signing-key` (from hardening, D6) | 1. a new Ed25519 pair in the `fin-review` keychain; 2. a control-path pull request adds the public half to `docs/review/receipt-keys/` (owner's approval); 3. receipts switch; 4. after open pull requests are re-receipted, remove the old public key | `gate` accepts a new receipt | keep both public keys | not affected |
 | `canary-key` | 1. roll the canary organisation's key in the console with a 1-hour overlap; 2. `pnpm fin monitoring apply` sets the monitor's secret from the secure prompt | `api-canary` green | the overlap | not affected |
 | `postgres-superuser` | Railway's Regenerate, then a failover and `pg_rewind` test (SP-17) | Patroni healthy; services connected | none | not possible |
 
@@ -1225,9 +1259,9 @@ are what each file says.
 | `telemetry-token`, `errors-dsn` | inject lines or errors | rotate | ignore lines from the old token's window during triage |
 | `heartbeat-url` | keep a dead duty looking alive | rotate | check the duty's second check (§7.7) |
 | `db-login` | act as that service in Postgres within its grants; the audit guard still refuses critical writes without events | rotate with `--emergency` (disable the old login at once) | `privileged-login`, `audit-guard` history |
-| `static-deploy-token` | replace every page of the environment | revoke at once; `pnpm fin static deploy <env> --release <current sha>` re-uploads the release's attested artefact | the watcher's manifest check; `rotate-static-deploy-token.md` |
+| `static-deploy-token` | replace every page of the environment | revoke at once; re-render and re-upload the release's attested artefact with `tools/static-deploy`, through Cloudflare's API ([BD-16]): `pnpm fin static render <env> --release <current sha>`, then `node tools/static-deploy/src/main.ts <env> --release <current sha>` | the watcher's manifest check; `rotate-static-deploy-token.md` |
 | `railway-project-token` | deploy and configure every service in the project | revoke in Railway | export Railway's audit log at once; the Railway variable leak playbook (§8.3) |
-| `receipt-signing-key` | sign a review receipt | remove its public key from `docs/review/receipt-keys/` (owner) | re-review every merge since the exposure |
+| `receipt-signing-key` (from hardening, D6) | sign a review receipt | remove its public key from `docs/review/receipt-keys/` (owner) | re-review every merge since the exposure |
 | `watcher-tokens` | read configuration (they hold no write scope) | rotate | none |
 
 ---
@@ -1237,9 +1271,9 @@ are what each file says.
 ### 7.1 Shape
 
 ARCHITECTURE §10.1 and spec 01 §8.1 to §8.2 hold: one organisation, teams `fin-staging` and
-`fin-production`, data region `europe`, two-factor enforced, every AI feature off, no MCP connection
-and no standing agent token ([OB-02], [OB-10]). Production repeats staging's objects under
-`fin-production` (H-06) with paging policies. Names:
+`fin-production`, data region `europe` (staging: `us_west`, [BD-24]), two-factor enforced, every AI
+feature off, no MCP connection and no standing agent token ([OB-02], [OB-10]). Production repeats
+staging's objects under `fin-production` (H-06) with paging policies. Names:
 
 | Object | Name |
 |---|---|
@@ -1449,9 +1483,9 @@ export function reportError(error: unknown, ids: {
 Options: `sendDefaultPii: false`, `release`, `environment`, `beforeSend: scrubEvent`,
 `beforeBreadcrumb: scrubBreadcrumb`, no tracing, `tracePropagationTargets: []`, no context lines,
 `withIsolationScope` per unit. `FIN_ERRORS_DSN` must match the regex SP-06 records in
-`packages/server/src/report-dsn.ts` (Better Stack's shape for region `europe`); any other value exits
-78. Node runs with `--enable-source-maps`, so server frames arrive mapped. `console.error(error)` is
-a lint error.
+`packages/server/src/report-dsn.ts` (Better Stack's shape for region `europe`; staging: `us_west`,
+[BD-24]); any other value exits 78. Node runs with `--enable-source-maps`, so server frames arrive
+mapped. `console.error(error)` is a lint error.
 
 **`scrubEvent`** keeps the exception type, a message only for `FinError`, frames (file, line, column,
 function) and the tags of the IDs above; it drops `request` (cookies, headers, query, data), `user`,
@@ -1509,10 +1543,13 @@ Try it holds a key.
 **Releases and source maps**: ARCHITECTURE §10.5 and §11.7 hold. `pnpm fin deploy` registers the
 release with every Errors application of the environment (`POST
 https://errors.betterstack.com/api/v1/releases`). The browser maps go from the build ([FD-19]): the
-build keeps them as the release's source-map artefact, and in staging the `sourcemaps-staging` job
-uploads that artefact (`pnpm fin sourcemaps upload`), in production the operator's launcher. Staging's
-Telemetry token comes from the `staging` environment, production's only from the secure prompt. No
-`*.map` is ever served.
+build keeps them as the release's source-map artefact. In staging, until the owner is back,
+`pnpm fin sourcemaps upload` uploads that artefact from the operator machine, with staging's CI
+Telemetry token read from its owner-only file there (§6.1, L1; [SA-22]; [FD-19]); from then the
+`sourcemaps-staging` job does, with that token from the `staging` environment ([BD-05]). In
+production the operator's launcher does, and production's token only ever comes from the secure
+prompt. No `*.map` is ever served: the build deletes the maps from `dist/`, and [BD-13]'s edge rule
+refuses a `*.map` path.
 
 **Triage, not paging.** Errors notifies by email on new and reoccurring errors in production; paging
 comes from log alerts on `error.unexpected` and `process.*` lines.
@@ -1525,7 +1562,7 @@ timeout of 15 s, a confirmation period of 120 s, a recovery period of 180 s, cer
 (§6.2 `monitor-header`). Production routes to `production-page` or `production-notify` as marked;
 staging to `staging-quiet`. A monitor's name is a Better Stack label, not a host: every `*-health`
 monitor checks an app host's own `/api/health` (OD-3), and none points at the fallback's per-app API
-hosts.
+hosts, which are not needed: S-01 passed on 21 Nov (SP-25; `docs/plan/spikes.md`).
 
 | Monitor | Check | Expect | Production |
 |---|---|---|---|
@@ -1535,7 +1572,7 @@ hosts.
 | `console-sign-in` | `GET https://console.<zone>/sign-in` | 200 with the shell's keyword | page |
 | `console-api-health` | `GET https://console.<zone>/api/health` | 200 JSON | page |
 | `admin` | `GET https://admin.<zone>/` | 302 to the Access sign-in | page |
-| `admin-api-health` | `GET https://admin.<zone>/api/health`, no Access token | Access's refusal as SP-25's check (d) records it (a 302 or a 401); proves Access covers `/api/*`. Fails if the answer carries `Fin-Release` or Fin's `errors/access_required` problem, which only the admin API half sends (spec 02 §18.4) | page |
+| `admin-api-health` | `GET https://admin.<zone>/api/health`, no Access token | Access's redirect, as S-01's check (i) recorded on 21 Nov for `/api/` and `/api/ping` (SP-25); proves Access covers `/api/*`. Fails if the answer carries `Fin-Release` or Fin's `errors/access_required` problem, which only the admin API half sends (spec 02 §18.4) | page |
 | `verify` | `GET https://verify.<zone>/` | 200 with keyword | page |
 | `verify-api-health` | `GET https://verify.<zone>/api/health` | 200 JSON | page |
 | `selfie` | `GET https://selfie.<zone>/api/health` | 200 JSON | notify |
@@ -1623,10 +1660,10 @@ a metric of §7.4 or `{ "sql": "<a saved exploration name>" }` for raw-log alert
 | `5xx-rate-<service>` | B | P | 5xx over requests above its ratio with a minimum count, or an absolute count | errors served | top `route` by 5xx; the last release | `5xx-rate.md` |
 | `db-or-door-down-<service>` | B | P | `process.health` with `dbOk` or `doorOk` false for 2 minutes | the service cannot reach Postgres or its door | `database-unreachable`; the callee's health | `db-or-door-down.md` |
 | `tunnel-connectors` | B | P | `watcher.check_failed check=connectors` | a connector of the wrong count, version or origin: a possible leaked token | §8.2 steps 1 and 2 | `evict-tunnel.md` |
-| `tunnel-config-drift` | B | P | `check=tunnel-config` or `check=dns` | a tunnel became remotely managed, or a record points elsewhere | the registered runs; Cloudflare's audit log | `tunnel-config-drift.md` |
+| `tunnel-config-drift` | B | P | `check=tunnel-config` or `check=dns` | a tunnel became remotely managed, or one of fin-next's records points elsewhere | the registered runs; Cloudflare's audit log | `tunnel-config-drift.md` |
 | `railway-exposed` | B | P | `check=railway`, or `pnpm fin verify` | a service has a public domain or a TCP proxy | Railway's audit log; remove it | `railway-exposed.md` |
 | `static-deployment-changed` | B | P | `check=routes` or `check=static` | a Worker was attached, a route changed, or a page differs from the release | §8.5's static playbook | `static-deployment-changed.md` |
-| `cloudflare-config-changed` | B | P | `check=rules`, `zone` or `access` | a rule set, zone setting or Access policy changed outside a run | Cloudflare's audit log | `cloudflare-config-changed.md` |
+| `cloudflare-config-changed` | B | P | `check=rules`, `zone` or `access` | one of fin-next's own rules (`ref` starting `fin_next_`, [BD-11]), a zone setting, or fin-next's Access application or policy changed outside a run; the old product's rules on the shared zone are not fin-next's ([FD-09]) | Cloudflare's audit log | `cloudflare-config-changed.md` |
 | `ingress-untrusted-peer` | B | P | any `ingress.untrusted_peer` | something on the private network called a service directly | the peer's service; a redeploy that reused an address | `ingress-untrusted-peer.md` |
 | `caller-signature-invalid`, `outside-request` | B | P | any `caller.signature_invalid`; any `api.outside_request` | a forged or stale signed call, or an operation outside the door matrix | a half-done caller-key rotation; the calling service | `outside-request.md` |
 | `tunnel-530-1033` | B | P | Logpush: 530 or 1033 counts per host above zero for 3 minutes (hardening) | a tunnel has no healthy connector | the connector services | `evict-tunnel.md` |
@@ -1667,7 +1704,7 @@ a metric of §7.4 or `{ "sql": "<a saved exploration name>" }` for raw-log alert
 | `security-email-unsent` | P | any `email.security_unsent` | a person was not told about an access change | the reason: suppressed, failed, budget | `security-email-unsent.md` |
 | `email-volume-high` | P | Cloudflare's sent count above Fin's own `email.sent` count, or above the ceiling | a leaked email token | `rotate-email-token.md`'s leak section | `rotate-email-token.md` |
 | `email-budget-reached` | N | the daily budget used, or the security share touched | a flood of ordinary mail | which template | `email.md` |
-| `email-setting-changed` | P | the watcher's `check=email` | preview or drop-suppressed turned on, or DMARC gone | `pnpm fin email verify` | `email.md` |
+| `email-setting-changed` | P | the watcher's `check=email` | preview or drop-suppressed turned on, or either sending subdomain's DMARC record (`_dmarc.auth.`, `_dmarc.notify.`) gone or, on staging, no longer `p=reject` ([BD-17]) | `pnpm fin email verify` | `email.md` |
 | `email-complaint`, `email-dmarc-failing` | N | Cloudflare's analytics (ARCHITECTURE §9.8) | deliverability at risk | the template and sending domain | `email.md` |
 
 **The area alerts, by spec** (their rows, with meaning and first check, are in the spec named):
@@ -1784,7 +1821,12 @@ and reads each alert's `paused_reason`, because Better Stack can pause an alert 
 
 - Datasets `http_requests` and `firewall_events` per zone, to the HTTP destination of the
   `fin-next-<env>-cloudflare` source, with the bearer token passed as `header_Authorization`.
-  Applied by `pnpm fin logpush apply <env>` with the operator token (Logs Edit).
+  Applied by `pnpm fin logpush apply <env>` with the operator token (Logs Edit). On the shared
+  staging zone each job carries a filter that keeps only requests whose `ClientRequestHost` is one
+  of fin-next's names ([FD-09]), so no request to the old product's hosts reaches Better Stack.
+  `pnpm fin logpush apply staging` checks each job against [FD-09]'s allow-list before it writes,
+  like every other staging write, and never changes a job it did not make (EX-27). The filter's
+  form is checked against Cloudflare's Logpush reference when the job is built (UNVERIFIED).
 - **Fields kept** (allowlist; anything else is never sent), for `http_requests`: `EdgeStartTimestamp`,
   `RayID`, `ClientRequestHost`, `ClientRequestMethod`, `EdgeResponseStatus`, `OriginResponseStatus`,
   `OriginResponseDurationMs`, `EdgeTimeToFirstByteMs`, `SecurityAction`, `SecurityRuleID`,
@@ -1834,7 +1876,7 @@ Docs from the monitors. Incidents are posted by the incident commander (§8.1).
 | T08-42 | U | `reportError` returns the `errorId` and writes `error.unexpected` with `safeError` fields only |
 | T08-43 | U | `credential-check` writes `credential.expiring` at 30, 14 and 7 days and pings a cadence heartbeat only while every credential of it is within cadence |
 | T08-44 | I | The database probe reports `auditUnsequencedS` above zero while the sequencer is stopped |
-| T08-45 | U | The Logpush Transformer definition outputs only the allowlisted keys, and the path's first segment |
+| T08-45 | U | The Logpush Transformer definition outputs only the allowlisted keys, and the path's first segment; the staging jobs' filter keeps only fin-next's names ([FD-09]) |
 
 ---
 
@@ -1845,12 +1887,13 @@ Docs from the monitors. Incidents are posted by the incident commander (§8.1).
 `docs/operations/incident-response.md` ([OP-02], ARCHITECTURE §15.2) holds the severities (SEV1:
 money or personal data at risk, or the product down; SEV2: a part down or degraded; SEV3: no user
 impact yet), the incident commander named in the roster with a hand-off rule, the first 15 minutes
-(acknowledge; decide the severity; a kill switch if money or data is at risk; the status page; export
-Railway's audit log at once; snapshot the relevant Better Stack lines with a saved exploration), the
-message templates, the 72-hour personal-data breach clock assessed at once with counsel ([DA-08]),
-and the blameless review within 5 working days, stored `age`-encrypted in the ops bucket with its
-action items (Issues are off in the public repository). Every runbook has §6.4's headings. The
-three this spec writes in full are §8.2 to §8.4; §8.5 indexes the rest.
+(acknowledge; decide the severity; a kill switch if money or data is at risk; the status page;
+export Railway's audit log at once; snapshot the relevant Better Stack lines with a saved
+exploration), the message templates, the 72-hour personal-data breach clock assessed at once with
+counsel ([DA-08]), and the blameless review within 5 working days, stored `age`-encrypted in the ops
+bucket with its action items (Issues are off in the public repository); on staging the encrypted
+review waits for CR-10 ([BD-14]). Every runbook has §6.4's headings. The three this spec writes in
+full are §8.2 to §8.4; §8.5 indexes the rest.
 
 ### 8.2 A leaked tunnel token: evict (`docs/runbooks/evict-tunnel.md`, [FD-15])
 
@@ -1869,9 +1912,11 @@ the assessment of step 10.
 1. **T+0 to T+2. Acknowledge** and open the incident. Name the tunnel: `public` or `admin` (or `db`:
    then step 9 at once, since nothing legitimate runs on it outside a registered run).
 2. **T+2 to T+4. Keep the evidence.** `pnpm fin tunnel status <env> <role> --record` writes the
-   connector list (connector IDs, versions, origin addresses, first-seen times) `age`-encrypted to the
-   ops bucket and prints a summary; `pnpm fin railway audit-export <env>` exports Railway's audit
-   log; save the `tunnel-connectors-history` exploration.
+   connector list (connector IDs, versions, origin addresses, first-seen times) `age`-encrypted to
+   the ops bucket and prints a summary; `pnpm fin railway audit-export <env>` exports Railway's
+   audit log; save the `tunnel-connectors-history` exploration. On staging, until the owner gives
+   CR-10, the connector list has no recipient, so it is not written ([BD-14]); the saved exploration
+   keeps the history.
 3. **Railway reachable?** `pnpm fin railway ping <env>`. If not, go to step 9.
 4. **T+4 to T+8. Prepare.** `pnpm fin tunnel prepare <env> <role>` creates the locally managed tunnel
    `fin-next-<env>-<role>-<yyyymmddhhmm>` with the same map, fetches its token with Tunnel Edit (never
@@ -1912,8 +1957,10 @@ the assessment of step 10.
       and run the money status sweep over every non-final transfer, because the rogue connector could
       have answered provider webhooks itself; if passwords are built, require a reset for every account
       that signed in with one in the window.
-    - **Admin tunnel:** end every staff session (`--realm staff`), revoke every Access session
-      (`pnpm fin access revoke-sessions <env>`), and review the staff audit log for the window.
+    - **Admin tunnel:** end every staff session (`--realm staff`), revoke every session of Fin
+      Admin's own Access application (`pnpm fin access revoke-sessions <env>`, that application's
+      token revocation; on the shared staging account it never revokes a session of the old
+      product's applications, [FD-09], EX-27), and review the staff audit log for the window.
     - **Both:** the personal-data breach assessment against the 72-hour clock, with counsel; tell
       Sumsub and MassPay if their webhooks crossed the window.
 11. **Close.** Record the times (paged, acknowledged, decided, swapped, retired, assessed) in the
@@ -1971,9 +2018,11 @@ allowlist): `backups/<nightly|hourly>/<yyyymmddThhmmssZ>.manifest.json` with `ki
 the manifest records the SHA-256 of the newest row's sealed text (D08-26).
 
 **The drill identity** (D08-16): dumps are encrypted to the escrow recipients and to a drill
-recipient. The drill identity lives in the owner's password manager and is typed at the secure prompt
-for each check or drill; it enters only the one-off task for that run. Its recipient is rotated after
-each full drill through a reviewed change to the settings file.
+recipient. The drill identity lives in the owner's password manager and is typed at the secure
+prompt for each check or drill; it enters only the one-off task for that run. Its recipient is
+rotated after each full drill through a reviewed change to the settings file. On staging the dumps,
+and so the restore check and the full drill, wait until the owner gives CR-10 and the drill
+recipient ([BD-14]); Railway's PITR and volume backups cover staging meanwhile.
 
 **The restore check** (`docs/runbooks/restore-check.md`; weekly in production, monthly in staging;
 heartbeat `restore-check`):
@@ -2024,7 +2073,7 @@ production (PG-05). Their first steps:
 
 | Playbook | Trigger | First steps |
 |---|---|---|
-| `static-deployment-changed.md` | `static-deployment-changed` | remove any route or Worker the release does not name (`pnpm fin routes apply <env>`); re-upload the release's attested artefact (`pnpm fin static deploy <env> --release <sha>`); revoke and re-mint the static deploy token; read Cloudflare's audit log; treat every credential typed into the changed page in the window as disclosed (end sessions, notify) |
+| `static-deployment-changed.md` | `static-deployment-changed` | remove any route or Worker the release does not name (`pnpm fin routes apply <env>`); on the shared staging zone that is only routes on fin-next's names and fin-next's own Workers, and a route on another name that matches one of fin-next's hosts is reported to the owner, never removed by `pnpm fin` ([FD-09], EX-27); re-render and re-upload the release's attested artefact with `tools/static-deploy` ([BD-16]: `pnpm fin static render <env> --release <sha>`, then `node tools/static-deploy/src/main.ts <env> --release <sha>`); revoke and re-mint the static deploy token; read Cloudflare's audit log; treat every credential typed into the changed page in the window as disclosed (end sessions, notify) |
 | `railway-variable-leak.md` | a Railway notice, or a leak of any service's variables | §8.3 |
 | `api-keys-leaked-at-scale.md` | `key-leaked` in bulk; a public dump | `live_keys` switch if live keys are involved; revoke the reported keys (`api`'s key-revoke door); email the organisations; consider rotating the pepper |
 | `personal-data-exposure.md` | a scrubber miss found in Better Stack; a read beyond the budgets; any PD-2 or PD-3 seen outside its place | contain (switch, revoke, delete the lines in Better Stack with its deletion request), record the scope, start the 72-hour clock with counsel |
@@ -2052,11 +2101,15 @@ with no cache, guarded by §3.5's audit rule):
 | `sumsub_writes` | the transit queue, submit and uploads | 03 §7.4 | none |
 
 There is no database switch for the whole public API: [OP-01] and ARCHITECTURE §15.1 list none, so
-stopping all of `api.` is the Cloudflare rule `killswitch-api` alone, unless the owner first adds such
-a switch to [OP-01]. The Cloudflare rules are WAF custom rules created disabled by the ops lanes and
-toggled by `pnpm fin killswitch <env> <rule> on|off` with the Cloudflare token alone; a block answers
-Fin's JSON problem document. Each switch has a test that it stops what it names and nothing else (T08-57), and each rule
-is toggled in a drill (§9).
+stopping all of `api.` is the Cloudflare rule `killswitch-api` alone, unless the owner first adds
+such a switch to [OP-01]. The Cloudflare rules are WAF custom rules created disabled in hardening
+(H-04, [OP-01]) and toggled by `pnpm fin killswitch <env> <rule> on|off` with the Cloudflare token
+alone; a block answers Fin's JSON problem document. Each switch has a test that it stops what it
+names and nothing else (T08-57), and each rule is toggled in a drill (§9). On the shared staging
+zone, the Free plan's five custom rules hold `http-unsafe-block`, [BD-13]'s path rule and three of
+these: `killswitch-api`, `killswitch-money` and `killswitch-signups` (spec 01 §7.6, ARCHITECTURE
+§5.7). `killswitch-verify` and the monitors' WAF skip rule (§6.2 `monitor-header`) are production's
+only.
 
 ---
 
@@ -2222,9 +2275,9 @@ staging, `[CI]` a CI job.
 | A08-27 [STG] | A forced alert of each severity emails `staging-quiet`; no staging object calls, texts or pushes | T08-38 |
 | A08-28 [STG] | The probe's `auditUnsequencedS` and `audit-unsequenced` work with the sequencer stopped | T08-44 |
 | A08-29 (production, PG-09) | A test page reaches each responder by critical push and call; the canary arrives for 7 days running | §9 |
-| A08-30 [STG] | The restore check passes end to end within its time target, with its report written | T08-56 |
-| A08-31 [STG] | The full restore drill runs with every step timed and compared with [P-14] | §9 |
-| A08-32 [STG] | Each kill switch and each Cloudflare rule stops what it names and nothing else | T08-57 |
+| A08-30 [STG] | The restore check passes end to end within its time target, with its report written. On staging it waits for CR-10 and the drill recipient ([BD-14]), and is not met until then | T08-56 |
+| A08-31 [STG] | The full restore drill runs with every step timed and compared with [P-14]. On staging it waits for CR-10 and the drill recipient ([BD-14]), and is not met until then | §9 |
+| A08-32 [STG] | Each kill switch, and each Cloudflare rule staging holds once hardening has made them (§8.6), stops what it names and nothing else | T08-57 |
 | A08-33 [STG] | A privileged login outside a registered run alerts | T08-59 |
 | A08-34 [STG] | `journal-unshipped` fires when the journal cannot ship, and the backlog ships afterwards | §9 |
 | A08-35 [I] | `sessions-end-all` ends every session of its realm with its events and journal entry | T08-58 |
@@ -2235,8 +2288,8 @@ staging, `[CI]` a CI job.
 ## 14. Decisions this spec makes
 
 D08-02, D08-32 and D08-34 change register entries and are already settled in DECISIONS appendix C
-(SF-10, SF-01). The steward copies the rest into DECISIONS.md as Recommended in the plan's first
-follow-up pull request.
+(SF-10, SF-01). The steward copies the rest into DECISIONS.md as Recommended in a later pull
+request of the plan.
 Builders proceed on them.
 
 | ID | Decision | Why |
@@ -2283,12 +2336,12 @@ Builders proceed on them.
 
 | # | Item | Who | By |
 |---|---|---|---|
-| 1 | [AU-01]: confirm that R9 means actions and disclosures, not a row per read | Owner | before Saturday's start (default built) |
+| 1 | Closed: the owner decided [AU-01] at its default at the Saturday sitting (21 Nov, about 08:25, "defaults"): R9 means actions and disclosures, not a row per read | none | decided |
 | 2 | [AU-03]: production's audit bucket lock, Indefinite by default | Owner | production |
-| 3 | [OB-18]: whether the watcher may stay a Worker; and D08-24's amendment to ARCHITECTURE §10.6 (TM-L12, in the private annex) | Owner | Saturday 12:00 (staging), production |
+| 3 | [OB-18] is decided: the owner took its default at the Saturday sitting (21 Nov, about 08:25, "defaults"), so the watcher stays a Worker. Still open: accepting the limit that D08-24 leaves (TM-L12, in the private annex). The daily canary is production's (§7.9, H-06), so nothing on staging waits on it; the steward folds D08-24's text into ARCHITECTURE §10.6 (item 6) | Owner | production |
 | 4 | Names across specs (D08-33). Settled on 21 Nov: spec 02's `keys.ts` fragment and `keys/` folder are now `api-keys.ts` and `api-keys/`, its four `api-key-*` templates are now `api-keys/key-changed`, and its key metadata and revoke reasons defer to spec 05 §4.9 and §4.10; the roll overlap is `now`, `1h` or `24h` in the request and the audit row alike (spec 02 §12.3, spec 05 §4.10); the Sandbox reset is `customer.sandbox_reset` everywhere; the reveal-budget notice is `staff-kyc/reveal-budget`. Spec 03's webhook names already defer to spec 05 §5.7 (spec 03 §16.5). Spec 04 §7.7 and §28 now use §3.3's `target` and `refs` (the guard's matching is D08-35's) | none | done |
 | 5 | Resolved on 21 Nov: spec 02 §18.4 and S2-35 now follow D08-14. Both admin monitors expect Access's own refusal, `admin-api-health` fails on any answer from the admin API half, and the watcher asserts the Access application's shape (`admin-access-shape`) | none | done |
-| 6 | ARCHITECTURE §7.12's page policy lacks `report-to`, and §10.6's canary sentence: fold D08-13 and D08-24 into the plan. Spec 01 S0-10's alert names (`static-deployment-changed`, `cloudflare-config-changed`) are folded into ARCHITECTURE §5.9 and §10.8 before the first commit | Steward | the plan's next follow-up |
+| 6 | ARCHITECTURE §7.12's page policy lacks `report-to`, and §10.6's canary sentence: fold D08-13 and D08-24 into the plan. Spec 01 S0-10's alert names (`static-deployment-changed`, `cloudflare-config-changed`) are folded into ARCHITECTURE §5.9 and §10.8 before the first commit | Steward | a later pull request of the plan |
 | 7 | Counsel ([DA-08]): audit for the life of the service, the 13-month context retention, the processor role, and how requests from people about their data are answered (§5.8) | Owner with counsel | production (PG-07) |
 | 8 | SP-06: the DSN regex for `report-dsn.ts`; whether a source token can be regenerated; what a read-only token reads | Ops agent | Saturday morning |
 | 9 | SP-11 and SP-13: Sumsub's and MassPay's credential shapes for `scrub-shapes.ts` | Sunday and Monday lanes | before their first merge |
