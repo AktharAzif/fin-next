@@ -1,0 +1,25 @@
+{
+  "name": "@fin/verify",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run build:server",
+    "build:server": "vite build --config vite.server.config.ts",
+    "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
+    "lint": "biome check .",
+    "typecheck": "pnpm run typecheck:server",
+    "typecheck:server": "tsc -p src/server/tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts"
+  },
+  "dependencies": {
+    "@fin/core": "workspace:*",
+    "@fin/server": "workspace:*",
+    "@fin/web-host": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}
