@@ -185,8 +185,10 @@ async function attempt(role: AuditRole, event: AuditEventName): Promise<string> 
 
 describe("T08-02: the registry in the database", () => {
   it("equals the compiled AUDIT_EVENTS after migrating a fresh database", async () => {
+    // Byte order on both sides (eventTypeRows sorts by code unit): the cluster's default collation
+    // depends on the host, and CI's image (en_US.utf8) would order some names the other way round.
     const rows = await su.query(
-      "SELECT name, area, category, scope, roles, journal_kind, retired FROM audit.event_type ORDER BY name",
+      'SELECT name, area, category, scope, roles, journal_kind, retired FROM audit.event_type ORDER BY name COLLATE "C"',
     );
     expect(rows.rows).toEqual(eventTypeRows());
     // The journal kind an event declares is the registry's, synced with it (§3.10).
