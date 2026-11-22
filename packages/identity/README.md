@@ -87,6 +87,12 @@ realm refuses to start with it on. `FIN_GOOGLE_TEST_ISSUER` points the provider 
   `account.google_unlink` intent bound to the account, only for the person's own Google row.
 - No provider token is kept: the account row's token columns stay empty, and the library's update
   on a later sign-in is off.
+- `auth.google_failed` (alert `google-sign-in-failing`) is written only for what Fin or the provider
+  did: the token endpoint unreachable, failing or unreadable, Fin's own client refused, the keys
+  unavailable, or an ID token that is not the provider's for this client now. Whatever a client can
+  cause, including by changing its own authorization request on its way through the browser (the
+  nonce, the scopes, the PKCE challenge, the redirect URI), is `auth.google_refused` with its
+  reason; `src/google/flow.ts` decides which is which.
 
 ## Layout
 

@@ -7,8 +7,13 @@
 // anything unreadable, is a refusal with a bounded reason; the token's contents never reach a log.
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 
-/** Why an ID token was refused (the `auth.google_failed` line's `reason`, §18.1). */
+/**
+ * Why an ID token was refused (§18.1). Which of these is a failure of Fin or the provider
+ * (`auth.google_failed`) and which a refusal a client can cause (`auth.google_refused`) is decided
+ * in flow.ts.
+ */
 export type IdTokenRefusal =
+  | "too_long"
   | "malformed"
   | "algorithm"
   | "unknown_key"
@@ -53,7 +58,8 @@ export type KeyLookup = (kid: string) => Promise<KeyObject | null>;
 export const CLOCK_SKEW_SECONDS = 60;
 /** An ID token older than this is refused, whatever its expiry says. */
 export const MAX_TOKEN_AGE_SECONDS = 3600;
-const MAX_TOKEN_LENGTH = 8192;
+/** The longest ID token read; a longer one is refused (`too_long`) before it is parsed. */
+export const MAX_TOKEN_LENGTH = 8192;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,253}\.[^\s@]{2,63}$/;
 
@@ -98,7 +104,10 @@ export async function verifyIdToken(
   expect: IdTokenExpectations,
   keyFor: KeyLookup,
 ): Promise<IdTokenResult> {
-  if (token.length === 0 || token.length > MAX_TOKEN_LENGTH) return refuse("malformed");
+  if (token.length === 0) return refuse("malformed");
+  // Past the bound before anything is parsed. The provider's own tokens are far shorter; the one
+  // part a client can make long is the nonce it puts in its authorization request.
+  if (token.length > MAX_TOKEN_LENGTH) return refuse("too_long");
   const parts = token.split(".");
   if (parts.length !== 3) return refuse("malformed");
   const [headerPart, payloadPart, signaturePart] = parts as [string, string, string];

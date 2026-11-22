@@ -6,6 +6,7 @@ import {
   type IdTokenExpectations,
   keysFromJwks,
   MAX_TOKEN_AGE_SECONDS,
+  MAX_TOKEN_LENGTH,
   tokenKeyId,
   verifyIdToken,
 } from "./id-token.ts";
@@ -94,11 +95,31 @@ describe("verifyIdToken", () => {
   });
 
   it.each([
+    ["malformed", ""],
     ["malformed", "not-a-token"],
     ["malformed", "a.b"],
     ["malformed", `${b64({ alg: "RS256" })}.not-json.sig`],
   ])("refuses %s input", async (reason, input) => {
     expect(await verifyIdToken(input, expect_, keys)).toEqual({ ok: false, reason });
+  });
+
+  it("refuses a token past its bound before reading it, with its own reason (a long nonce makes one)", async () => {
+    const long = token({ ...good, nonce: "n".repeat(MAX_TOKEN_LENGTH) });
+    expect(long.length).toBeGreaterThan(MAX_TOKEN_LENGTH);
+    let looked = false;
+    const result = await verifyIdToken(long, expect_, async (kid) => {
+      looked = true;
+      return keys(kid);
+    });
+    expect(result).toEqual({ ok: false, reason: "too_long" });
+    expect(looked).toBe(false);
+    // Just within the bound, a token is read.
+    const base = token({ ...good, pad: "" });
+    const room = Math.floor(((MAX_TOKEN_LENGTH - base.length) * 3) / 4) - 3;
+    const near = token({ ...good, pad: "p".repeat(room) });
+    expect(near.length).toBeLessThanOrEqual(MAX_TOKEN_LENGTH);
+    expect(near.length).toBeGreaterThan(MAX_TOKEN_LENGTH - 16);
+    expect((await verifyIdToken(near, expect_, keys)).ok).toBe(true);
   });
 
   it.each([
