@@ -1,13 +1,13 @@
 // The alerts identity's line list (packages/identity/src/monitoring.ts) names for audit.write_failed
 // are staging rules over that event, as spec 08 §3.14 defines them, each with a runbook that exists
 // and names it back, and the catalogue's entry names the same alerts. The fields every writer
-// passes are the ones the catalogue declares, and the catalogue, runbook and alert say when a
-// writer leaves the audit event's name out. audit-not-written opens one incident per service,
+// passes are the ones the catalogue declares, and the catalogue, runbook and alert say what a line
+// without the audit event's name is labelled. audit-not-written opens one incident per service,
 // SQLSTATE and audit event, each label held to a closed set (for the event, the names in
 // AUDIT_EVENTS, read from packages/audit's generated index, and the events each area's recorder
 // writes, read from its events module), so a refusal that stands never hides a later, different
-// one and no line can choose or multiply a label. The scenarios build each line from the fields
-// its writer passes, so a writer that drops the event's name shows as the residual it leaves. The
+// one and no line can choose or multiply a label. The scenarios build each line as the envelope
+// ships it, so a line that names its event and one that does not each show where they land. The
 // list, the writers and the index are read as text, and the area events by a child Node:
 // ops/monitoring imports no other package, which is why this package's tests are never cached
 // (ops/monitoring/turbo.json, test/turbo.test.ts).
@@ -27,8 +27,8 @@ const EVENT = "audit.write_failed";
 const AUDIT_WRITER = join(ROOT, "packages", "audit", "src", "record.ts");
 const IDENTITY_WRITER = join(ROOT, "packages", "identity", "src", "audit", "record.ts");
 const RUNBOOK = join(ROOT, "docs", "runbooks", "audit-not-written.md");
-/** What the catalogue, runbook and alert say while a recorder passes the audit event as `event`. */
-const RECORDER_GAP = "passes the event's name as `event`";
+/** What the catalogue, runbook and alert say of a line that does not name its audit event. */
+const NO_EVENT = ["a line without auditevent", "other"];
 /** The services whose logins record audit events (spec 08 §3.4), and migrate for the tasks. */
 const RECORDING_SOURCES = ["admin", "api", "console", "migrate", "payments", "worker"];
 const AUDIT_PACKAGE = join(ROOT, "packages", "audit");
@@ -155,17 +155,18 @@ describe(`the fields the writers of ${EVENT} pass`, () => {
     }
   });
 
-  it("leave the audit event's name out exactly while the catalogue, runbook and alert say so", () => {
-    // While a recorder passes `event`, its lines arrive without the audit event's name, and the
-    // catalogue, the runbook and the alert's check must say so; once none does, they must stop.
-    const passesEvent = recorders.some((file) =>
-      writtenFields(file).some((fields) => fields.includes("event")),
-    );
-    const says = (text: string) => text.replace(/\s+/g, " ").includes(RECORDER_GAP);
+  it("when they leave out auditEvent, land on the label other, as the catalogue, runbook and alert say", () => {
+    // A name passed as `event` is dropped by the envelope, which keeps its own; any line that
+    // arrives without the audit event's name is labelled `other` (below), and the texts say so and
+    // how to read it, whichever writer it came from.
+    const says = (text: string) => {
+      const plain = text.replace(/`/g, "").replace(/\s+/g, " ").toLowerCase();
+      return NO_EVENT.every((phrase) => plain.includes(phrase));
+    };
     const check = config?.alerts.find((a) => a.name === "audit-not-written")?.metadata?.check;
-    expect(says(entry.writtenBy), "the catalogue's writtenBy").toBe(passesEvent);
-    expect(says(readFileSync(RUNBOOK, "utf8")), "the runbook").toBe(passesEvent);
-    expect(says(check ?? ""), "the alert's metadata.check").toBe(passesEvent);
+    expect(says(entry.writtenBy), "the catalogue's writtenBy").toBe(true);
+    expect(says(readFileSync(RUNBOOK, "utf8")), "the runbook").toBe(true);
+    expect(says(check ?? ""), "the alert's metadata.check").toBe(true);
   });
 
   it("are read as keys, never as the values' names, shorthand keys included", () => {
@@ -480,7 +481,7 @@ describe("audit-not-written's incidents", () => {
 
   it("hold each label to a closed set: the rule's sources, a five-character SQLSTATE, the code's audit events", () => {
     expect(AUDIT_EVENTS).toEqual(expect.arrayContaining([OWN, FOREIGN, SECOND]));
-    // identity's recorder is the only writer console and admin have: its events are in the set.
+    // identity's recorder writes console's and admin's sign-in events: they are in the set.
     expect(AREA_EVENTS).toEqual(
       expect.arrayContaining(["session.created", "staff.signed_in", "staff.signed_out"]),
     );
@@ -599,11 +600,9 @@ describe("audit-not-written's incidents", () => {
     ]);
   });
 
-  describe("for console's and admin's lines, which only identity's recorder writes", () => {
+  describe("for console's and admin's lines", () => {
     // console records the person-scope events (fin_console) and admin the staff realm's
     // (fin_admin): a staff event's FA002 on console, or a person event's on admin, is foreign.
-    const written = nameField(IDENTITY_WRITER);
-    const named = written === "auditEvent";
     /** The incidents for console's scenario, and for an FA002 standing on each service. */
     const outcomes = (field: string) => ({
       console: incidents(
@@ -643,19 +642,15 @@ describe("audit-not-written's incidents", () => {
       adminFa002: ["admin/FA002/staff.signed_in", "admin/FA002/session.created"],
     };
 
-    it("are read from the field identity's recorder passes the event's name in", () => {
-      expect(["auditEvent", "event"]).toContain(written);
-    });
-
-    it("are one per service, SQLSTATE and event once the recorder names the event auditEvent", () => {
+    it("are one per service, SQLSTATE and event for lines that name it auditEvent, a foreign event's FA002 behind a standing FA002 included", () => {
       expect(outcomes("auditEvent")).toEqual(perEvent);
     });
 
-    it("are, as the recorder writes them today, per event once it names it, and per service and SQLSTATE only while it passes `event`", () => {
-      // While it passes `event`, the envelope keeps its own `event`, the line carries no
-      // auditEvent, and every console and admin refusal is <service>/<sqlstate>/other: the second
-      // FA002 joins the first's incident, and a foreign event's FA002 joins a standing FA002's,
-      // sending no email. The runbook and the alert's check say so for exactly as long.
+    it("give a line without auditEvent the label other, so such lines share an incident per service and SQLSTATE", () => {
+      // A name passed as `event` is dropped (the envelope keeps its own `event`), so the line
+      // carries no auditEvent and lands on <service>/<sqlstate>/other: the second FA002 joins the
+      // first's incident, and a foreign event's FA002 joins a standing FA002's, sending no email.
+      // The runbook and the alert's check say to read every line of an open `other` incident.
       const residual = {
         console: [
           { series: "console/FA004/other", at: 60 },
@@ -665,7 +660,7 @@ describe("audit-not-written's incidents", () => {
         consoleFa002: ["console/FA002/other"],
         adminFa002: ["admin/FA002/other"],
       };
-      expect(outcomes(written)).toEqual(named ? perEvent : residual);
+      expect(outcomes("event")).toEqual(residual);
     });
   });
 });

@@ -10,12 +10,12 @@ event was refused, so the transaction rolled back and the action failed with a 5
 only the request ID: nothing changed, and nothing is missing from the trail, but the person, key,
 job or operator that tried it was refused, and every later try fails the same way until the cause
 is fixed. The line names the reason (`sqlstate`), never the action's values. Two kinds of writer
-write it: packages/audit's `recordAudit` (the api tasks), and each area's own recorder
-(`packages/<area>/src/audit/record.ts`, such as identity's for the sign-in, session, factor and
-staff enrolment events). A line with `auditEvent` names the refused event. A line without one came from a
-recorder that passes the event's name as `event`, which the line's own name overwrites, so the
-line carries `sqlstate` only, and the refused action is found from the request (First check, step
-2). Most often a release broke an event:
+write it, and each names the refused event in `auditEvent`: packages/audit's `recordAudit` (the
+api tasks), and each area's own recorder (`packages/<area>/src/audit/record.ts`, such as
+identity's for the sign-in, session, factor and staff enrolment events). A line without
+`auditEvent` lost the event's name (one passed as `event` is dropped, since the envelope keeps
+`event` as the line's own name): it carries `sqlstate` only, and the refused action is found from
+the request (First check, step 2). Most often a release broke an event:
 
 - `FA001`: the event is unknown or retired in `audit.event_type` (the registry was not synced
   after the release, or a retired name is still written).
@@ -42,21 +42,15 @@ An incident is per service, SQLSTATE and audit event: its series is
 an `FA011`, or an `FA002` on another event, opens its own incident and sends its own email while an
 `FA004` stands on the same service. Each label is held to a closed set: the services the alert
 reads, a five-character SQLSTATE (`FA004`, `42501`), and the audit events the code defines (the
-events in packages/audit's `AUDIT_EVENTS` and those each area's own recorder writes, identity's
-today). Any other value, or none, is the one label `other`: a line without `auditEvent`, an
-`auditEvent` the code does not define, and the area recorders' `input` and `unknown`. So no line
-can choose a label or add one, and every line still opens or joins an incident; none is dropped.
-Read the value an `other` stands for from the line itself. Lines that share an `other` label share
-an incident: while one stands, a later refusal with the same service and SQLSTATE whose event is
-`other` too joins it, so read the lines, not only the incidents.
-
-While identity's recorder passes the event's name as `event`, none of its lines carries
-`auditEvent`, and it is the only writer console and admin have. So every console and admin refusal
-is `<service>/<sqlstate>/other`: there an incident is per service and SQLSTATE only, and one
-standing `FA002` hides the next `FA002` on another event, the foreign-event `FA002` that must wake
-the owner among them, which joins the open incident and sends no email. While such an incident is
-open, read each of its lines (First check, step 2) and treat any foreign-event `FA002` among them as
-the email it did not send.
+events in packages/audit's `AUDIT_EVENTS` and those each area's own recorder writes). Any other
+value, or none, is the one label `other`: a line without `auditEvent`, an `auditEvent` the code
+does not define, and the area recorders' `input` and `unknown`. So no line can choose a label or
+add one, and every line still opens or joins an incident; none is dropped. Read the value an
+`other` stands for from the line itself. Lines that share an `other` label share an incident:
+while one stands, a later refusal with the same service and SQLSTATE whose event is `other` too
+joins it and sends no email, a foreign-event `FA002` among them. So while an `other` incident is
+open, read each of its lines (First check, step 2), not only the incident, and treat any
+foreign-event `FA002` among them as the email it did not send.
 
 ## First check
 
@@ -107,6 +101,6 @@ The refused action changed nothing, so there is nothing to undo: the work is to 
 
 At once for `FA011`, for `FA002` on an event no fragment gives the service, or for any refusal no
 new release explains. Each opens its own incident and email even while another refusal stands on
-the same service, unless it shares an `other` label with it, as every console and admin refusal
-does for now (What it means). A refusal a release caused can wait for the rollback, unless it
-blocks sign-in, a factor, a credential or a member change for more than 15 minutes.
+the same service, unless it shares an `other` label with it (What it means). A refusal a release
+caused can wait for the rollback, unless it blocks sign-in, a factor, a credential or a member
+change for more than 15 minutes.

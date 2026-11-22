@@ -12,19 +12,19 @@ export const entries: readonly CatalogEntry[] = [
     kind: "failure",
     level: "error",
     writtenBy:
-      "recordAudit (packages/audit) when the database refuses the event with an FA SQLSTATE, with `auditEvent` and `sqlstate` (its input refusals and other database errors write no line); each area's recorder (packages/<area>/src/audit/record.ts) when its input check refuses the event (`sqlstate` `input`) or the database refuses it with any code (the SQLSTATE as it is, `unknown` when there is none). A recorder that passes the event's name as `event` loses it to the envelope, which keeps `event` as the line's own name, so its lines carry `sqlstate` only until it renames the field. The action rolls back and answers 500 with the request ID only",
+      "recordAudit (packages/audit) when the database refuses the event with an FA SQLSTATE, with `auditEvent` and `sqlstate` (its input refusals and other database errors write no line); each area's recorder (packages/<area>/src/audit/record.ts) when its input check refuses the event (`sqlstate` `input`) or the database refuses it with any code (the SQLSTATE as it is, `unknown` when there is none). A name passed as `event` is lost to the envelope, which keeps `event` as the line's own name: a line without `auditEvent` carries `sqlstate` only, and the alert labels its event `other`. The action rolls back and answers 500 with the request ID only",
     // Spec 08 §7.2 names the audit event's field `event`; the envelope owns `event` (the line's own
-    // name, MC-03), so the writers call it `auditEvent`. A recorder that still passes `event` has
-    // it dropped by an envelope-wins sink; test/audit-alerts.test.ts reads every writer and holds
-    // `writtenBy`, the runbook and the alert's check text to the fields they pass.
+    // name, MC-03), so the writers call it `auditEvent`; a name passed as `event` is dropped by an
+    // envelope-wins sink. test/audit-alerts.test.ts reads every writer's fields, and holds
+    // `writtenBy`, the runbook and the alert's check text to say what a line without it becomes.
     fields: { auditEvent: "string", sqlstate: "string" },
     alerts: ["audit-not-written"],
     // One incident per service, SQLSTATE and audit event: a refusal that stands (every later try
     // fails the same way) must never hide a later, different one, such as an FA011 or an FA002 on
     // an event no fragment gives the service (MC-04). The rule holds each label to a closed set (for
     // the event, AUDIT_EVENTS and the area recorders' own events) and gives any other value, a
-    // missing one included, the one label `other`: so a recorder's lines without `auditEvent` share
-    // it, and on their service an incident is per SQLSTATE only.
+    // missing one included, the one label `other`: lines without `auditEvent` share it, and so share
+    // one incident per service and SQLSTATE.
     seriesBy: ["service", "sqlstate", "auditEvent"],
   },
   {
