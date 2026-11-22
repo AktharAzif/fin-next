@@ -260,9 +260,9 @@ describe("each of the guard's checks", () => {
 });
 
 // These tests read files outside packages/server (each app's manifest, vite.server.config.ts and
-// sources, packages/audit/src and packages/testing), so turbo.json names them as inputs of
-// `@fin/server#test`: a change to any of them runs the tests again instead of replaying a cached
-// pass.
+// sources, packages/audit/src and packages/testing). Turborepo runs every test task without its
+// cache (turbo.json; scripts/test/turbo-config.test.mjs), so a change to any of them runs the tests
+// again instead of replaying a cached pass.
 describe("the real server bundles", () => {
   const configs = globSync("apps/*/vite.server.config.ts", { cwd: REPOSITORY })
     .map((path) => path.split(sep).join("/"))
