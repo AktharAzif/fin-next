@@ -1,0 +1,39 @@
+/*
+ * @fin/tokens fonts.css: Inter for the interface and Fira Mono for what people copy, served as files
+ * from the app's own origin (font-src 'self'). The url()s are relative so the build emits hashed
+ * files, never data: URIs (FW-C05). Licences: fonts/OFL.txt.
+ */
+
+@font-face {
+  font-family: "Inter Variable";
+  src: url("./fonts/inter-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Fira Mono";
+  src: url("./fonts/fira-mono-latin-400-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Fira Mono";
+  src: url("./fonts/fira-mono-latin-500-normal.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* A local face metric-matched to Inter, so lines break the same before Inter arrives. */
+@font-face {
+  font-family: "Inter Fallback";
+  src: local("Arial"), local("Helvetica Neue"), local("Helvetica"), local("Liberation Sans");
+  size-adjust: 107.51%;
+  ascent-override: 90.22%;
+  descent-override: 22.32%;
+  line-gap-override: 0%;
+}

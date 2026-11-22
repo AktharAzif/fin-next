@@ -280,6 +280,10 @@ describe("static:check", () => {
     for (const first of ["@layer ui-sdk-overrides;", "@layer ui-sdkx;", "@layer base, ui-sdk;"]) {
       assert.deepEqual(rules(checkCss("a.css", `${first}\n`)), ["static-css"], first);
     }
+    // A sub-layer of ui-sdk is not the layer either (\b would have matched before "." and "-").
+    for (const first of ["@layer ui-sdk.inner;", "@layer ui-sdk-extra; a{}"]) {
+      assert.deepEqual(rules(checkCss("a.css", `${first}\n`)), ["static-css"], first);
+    }
   });
 
   test("a source map, a built _headers or env.json fails", () => {
