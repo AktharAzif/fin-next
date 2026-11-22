@@ -1,11 +1,31 @@
 {
-  "$comment": "Phase 0's audit alerts (spec 08 §3.14, §7.8 group D). The sources are the services whose logins record audit events (spec 08 §3.4), and migrate for the operator tasks. The rest of group D comes with the guard alert and the chain, anchor and journal duties that write their lines.",
+  "$comment": "Phase 0's audit alerts (spec 08 §3.14, §7.8 group D). The sources are the services whose logins record audit events (spec 08 §3.4), and migrate for the operator tasks. audit-not-written's series is the service, the SQLSTATE and the audit event, so a refusal that stands never hides a later, different one (MC-04); each label is held to a closed set (the rule's sources, a five-character SQLSTATE, the names in packages/audit's generated AUDIT_EVENTS), and any other value, a missing one included, is the one label `other`, so no line can choose or multiply a label and every line still counts. The rest of group D comes with the guard alert and the chain, anchor and journal duties that write their lines.",
   "alerts": [
     {
       "name": "audit-not-written",
       "group": "D",
       "severity": "P",
       "sources": ["api", "worker", "payments", "console", "admin", "migrate"],
+      "seriesBy": [
+        {
+          "field": "service",
+          "oneOf": ["api", "worker", "payments", "console", "admin", "migrate"]
+        },
+        { "field": "sqlstate", "shape": "sqlstate" },
+        {
+          "field": "auditEvent",
+          "oneOf": [
+            "audit.epoch_started",
+            "audit.failover_recorded",
+            "audit.restore_replayed",
+            "operator.credential_rotated",
+            "operator.escrow_opened",
+            "operator.task_completed",
+            "switch.tripped",
+            "system.sweep_completed"
+          ]
+        }
+      ],
       "query": { "count": { "events": ["audit.write_failed"] } },
       "operator": "higher_than",
       "threshold": "@any",

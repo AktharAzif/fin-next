@@ -19,6 +19,11 @@ export const entries: readonly CatalogEntry[] = [
     // `writtenBy`, the runbook and the alert's check text to the fields they pass.
     fields: { auditEvent: "string", sqlstate: "string" },
     alerts: ["audit-not-written"],
+    // One incident per service, SQLSTATE and audit event: a refusal that stands (every later try
+    // fails the same way) must never hide a later, different one, such as an FA011 or an FA002 on
+    // an event no fragment gives the service (MC-04). The rule holds each label to a closed set and
+    // gives any other value, a missing one included, the one label `other`.
+    seriesBy: ["service", "sqlstate", "auditEvent"],
   },
   {
     event: "database.audit_guard",

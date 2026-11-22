@@ -1,6 +1,7 @@
 # An action refused because its audit event could not be written
 
-Alert: `audit-not-written` (any `audit.write_failed`).
+Alert: `audit-not-written` (any `audit.write_failed`), one incident per service, SQLSTATE and audit
+event.
 
 ## What it means
 
@@ -36,6 +37,18 @@ line carries `sqlstate` only, and the refused action is found from the request (
 
 A commit the guard refused (`FA010`) is `database.audit_guard`, not this alert.
 
+An incident is per service, SQLSTATE and audit event: its series is
+`<service>/<sqlstate>/<auditEvent>`. A refusal that stands never hides a later, different one, so
+an `FA011`, or an `FA002` on another event, opens its own incident and sends its own email while an
+`FA004` stands on the same service. Each label is held to a closed set: the services the alert
+reads, a five-character SQLSTATE (`FA004`, `42501`), and the events in packages/audit's
+`AUDIT_EVENTS`. Any other value, or none, is the one label `other`: a line without `auditEvent`, an
+`auditEvent` outside `AUDIT_EVENTS`, and the area recorders' `input` and `unknown`. So no line can
+choose a label or add one, and every line still opens or joins an incident; none is dropped. Read
+the value an `other` stands for from the line itself. Lines that share an `other` label share an
+incident: while one stands, a later refusal with the same service and SQLSTATE whose event is
+`other` too joins it, so read the lines, not only the incidents.
+
 ## First check
 
 Find the refused action by IDs only, never by a name, an address or the action's values.
@@ -51,8 +64,9 @@ Find the refused action by IDs only, never by a name, an address or the action's
 3. Whether `release` is new: did it change the event's fragment, its `roles` or its metadata
    schema, and did migrate sync the registry after it (`migrate.done` for the release)?
 4. Whether one service and one event (its `auditEvent`; without one, the `route`, or the
-   `authPath` for a library path) refuse, or many: one is a bug in that caller; many at once is
-   the registry. `FA011` is never routine: go to Containment, step 3.
+   `authPath` for a library path) refuse, or many (each its own incident, or the lines of one
+   `other` incident): one is a bug in that caller; many at once is the registry. `FA011` is never
+   routine: go to Containment, step 3.
 
 ## Containment
 
@@ -76,11 +90,14 @@ The refused action changed nothing, so there is nothing to undo: the work is to 
    `privileged-login` history, and rotate the login (`privileged-login.md`).
 5. Close it when the same action (its `route` or `authPath`) or task, tried again on the fixed
    release, writes its event and no new `audit.write_failed` comes from that `release` (for
-   `FA011`, only once the owner has said how the head is restored); the alert recovers 15 minutes
-   after the last line. Tell whoever was refused (by the IDs found above) to try again.
+   `FA011`, only once the owner has said how the head is restored); each incident recovers 15
+   minutes after the last line of its service, SQLSTATE and event. Tell whoever was refused (by
+   the IDs found above) to try again.
 
 ## When to wake the owner
 
 At once for `FA011`, for `FA002` on an event no fragment gives the service, or for any refusal no
-new release explains. A refusal a release caused can wait for the rollback, unless it blocks
-sign-in, a factor, a credential or a member change for more than 15 minutes.
+new release explains. Each opens its own incident and email even while another refusal stands on
+the same service, unless it shares an `other` label with it (What it means). A refusal a release
+caused can wait for the rollback, unless it blocks sign-in, a factor, a credential or a member
+change for more than 15 minutes.
