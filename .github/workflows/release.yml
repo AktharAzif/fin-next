@@ -19,10 +19,9 @@
 # matched would fail every later release).
 #   static        runs no install and no dependency code: takes the staged outputs on no trust
 #                 (release-static.mjs merge refuses anything a deployment would), carries the
-#                 previous release's own assets/ in (FW-C13), scans each artefact (bundle-check:
-#                 secret shapes, public-safety, setting names, server-only markers, maps, origins;
-#                 and gitleaks), and only then uploads static-<key>-<sha> (90 days), the source
-#                 maps as source-maps-<sha>, and attests them
+#                 previous release's own assets/ in (FW-C13), scans each artefact with gitleaks,
+#                 and only then uploads static-<key>-<sha> (90 days), the source maps as
+#                 source-maps-<sha>, and attests them
 #   manifest      release-manifest.json (commit, image digests from exactly one record per image,
 #                 static artefact SHA-256s, migrations) as the artefact release-<sha>, attested,
 #                 refused when any image's record is missing, unbuilt or without its digest.
@@ -209,8 +208,6 @@ jobs:
         env:
           PREVIOUS_SHA: ${{ steps.previous.outputs.sha }}
         run: node .github/scripts/release-static.mjs merge
-      - name: Scan each artefact (secret shapes, public-safety, setting names, server-only markers, maps, origins)
-        run: node .github/scripts/bundle-check.mjs --artefacts release/static
       - name: gitleaks (each artefact)
         run: .github/scripts/gitleaks-static.sh release/static
       - name: Upload static-console

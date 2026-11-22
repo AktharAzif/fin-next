@@ -8,7 +8,7 @@
 
 FROM cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d AS cloudflared
 
-# ---- deps: as app.Dockerfile's
+# ---- deps: as app.Dockerfile's, and held to the same instructions by packages/server's tests
 FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS deps
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV TURBO_TELEMETRY_DISABLED=1 \
@@ -33,7 +33,8 @@ RUN FIN_BUILD_TARGET=release pnpm --filter @fin/connector run build \
     && node ops/docker/harness-scan.mjs apps/connector/dist/server \
     && test -f apps/connector/dist/server/main.js
 
-# ---- release
+# ---- release: packages/server's tests read its start as app.Dockerfile's (no ENTRYPOINT, HEALTHCHECK
+# or NODE_* ENV, and this CMD alone)
 FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f92717143215d248fd55771ee1936ef4b3302e531 AS release
 # The official image installs the binary at /usr/local/bin/cloudflared; CI's build confirms the path.
 COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared

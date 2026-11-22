@@ -10,26 +10,43 @@
 // repository, however Docker lets the copy name its stage (by index, in quotes, with an escape,
 // after another flag) or lets a parent stage bring it in (ONBUILD, a command, a copy). The one
 // thing a release stage may take beside its bundle is a copy ops/docker/release-allowlist.json
-// names word for word (today the database's files, from app.Dockerfile's db-assets stage), whose
-// stage must end in the scan over exactly what it copies; an unlisted copy, the listed one changed,
-// or its stage's scan left out, moved or pointed elsewhere is refused, and so is an allowlist of
-// any other shape. A `pre` script is read only when it is byte for byte a command the allowlist
-// names (the api's generator of the audit event index); that command edited by one byte, any other
-// pre-script and every `post` script are refused. It reads
-// the Dockerfile's lines as Docker's parser does, and refuses what Docker would read otherwise
-// (a parser directive, a heredoc however its lines are continued), a Dockerfile holding any
-// character but printable ASCII, tabs and newlines, and one that names two stages alike (Docker
-// reads the last stage of a name, where a first match would read the first). The scan itself
-// finds each of CI's bundle-check harness rules in a planted output (the fin:test-seam marker, a
-// module comment naming packages/testing, as bundle-check's `//#region` and as this build's Vite
-// writes it, `// <path>`, an import of the harness's package, packages/testing in a map's sources,
-// inline or beside the file), refuses a link and a missing or empty output, and passes an honest
-// one.
+// names word for word for its Dockerfile (today the database's files, from app.Dockerfile's
+// db-assets stage), whose stage must be exactly the command the allowlist names as making it and
+// then the scan in its database files' mode over exactly what it copies, built on the bundle's
+// build stage's parent and run where that stage runs pnpm; an unlisted copy, the listed one
+// changed or in another Dockerfile, its stage's scan left out, moved, pointed elsewhere or in the
+// bundle's mode, any other step or instruction of its stage, before the scan or after it, or
+// another parent or directory is refused, and so is an allowlist of any other shape; and that
+// command stages nothing but the files of packages/db/src/assets.ts's rule. The stages under the
+// bundle's build stage (deps) are held to the pinned base, word for word (a RUN, a step, an ENV, an
+// ARG, an ADD or a COPY planted there is refused, and so is a base image that is not Node's by
+// digest and a workspace script pnpm's install runs, in the root's manifest or a package's that
+// pnpm-workspace.yaml's packages list names, which is read as YAML reads it, comment and blank
+// lines included, and refuses every build when it holds a line the reader cannot read), and the
+// release stage starts nothing but its bundle (no ENTRYPOINT, HEALTHCHECK or NODE_* ENV, and one
+// CMD of known flags and main.js). Each of the variants of the steward's ruling of 22 Nov on the
+// db-assets copy is shown refused by the reader, by the scan of the stage's output, or by both. A
+// `pre` script is read only when it is byte for byte a command
+// the allowlist names (the api's generator of the audit event index); that command edited by one
+// byte, any other pre-script and every `post` script are refused. It reads the Dockerfile's lines
+// as Docker's parser does, and refuses what Docker would read otherwise (a parser directive, a
+// heredoc however its lines are continued), a Dockerfile holding any character but printable
+// ASCII, tabs and newlines, and one that names two stages alike (Docker reads the last stage of a
+// name, where a first match would read the first). The scan itself
+// finds each harness rule of CI's bundle check (which returns with the tokenizer PR) in a planted
+// output (the fin:test-seam marker, a module comment naming packages/testing, as the bundle check's
+// `//#region` and as this build's Vite writes it, `// <path>`, an import of the harness's package,
+// packages/testing in a map's sources, inline or beside the file), refuses a link and a missing or
+// empty output, and passes an honest one; in its database files' mode it also refuses every file
+// but a .sql or .json file in the database's folders, any path containing packages/testing and any
+// directory outside those folders, and passes the database's files.
 import { spawnSync } from "node:child_process";
 import {
+  cpSync,
   globSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -37,11 +54,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { workspaceGlobs as vitestWorkspaceGlobs } from "../../../../vitest.config.ts";
 import {
   ALLOWLIST_FILE,
   builderFlags,
+  DB_ASSETS_SCAN,
   type ImageBuild,
   imageBuilds,
   RELEASE_STAGE,
@@ -50,6 +69,7 @@ import {
   SCAN_SCRIPT,
   shellSteps,
   viteBuildConfig,
+  workspaceGlobs,
 } from "../../test/image-build.ts";
 
 const REPOSITORY = resolve(import.meta.dirname, "../../../..");
@@ -106,6 +126,9 @@ function replace(files: Map<string, string>, path: string, from: string, to: str
   files.set(path, text.replace(from, to));
 }
 
+/** `text` with its regular expression's special characters escaped. */
+const literal = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /** Sets the scripts `scripts` (a name to undefined removes it) in the app `app`'s manifest. */
 function setScripts(
   files: Map<string, string>,
@@ -121,6 +144,24 @@ function setScripts(
   files.set(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
+// A package pnpm-workspace.yaml lists after others, and not under a control path: its manifest.
+const MONITORING_MANIFEST = "ops/monitoring/package.json";
+// The line that lists it, and a postinstall that empties the scan, which pnpm's install would run.
+const MONITORING_ITEM = "  - ops/monitoring\n";
+const EMPTIES_SCAN = { postinstall: "cp /dev/null ../docker/harness-scan.mjs" };
+
+/** Plants ops/monitoring's real manifest with the scripts `scripts` added. */
+function plantMonitoring(
+  files: Map<string, string>,
+  scripts: Readonly<Record<string, string>> = {},
+): void {
+  const manifest = JSON.parse(readFileSync(join(REPOSITORY, MONITORING_MANIFEST), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  manifest.scripts = { ...manifest.scripts, ...scripts };
+  files.set(MONITORING_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 // app.Dockerfile's text: its build step's parts and its release stage's copy of the output.
 const APP_RUN_BUILD = `FIN_BUILD_TARGET=release pnpm --filter "@fin/\${APP}" run build:server`;
 const APP_RUN_SCAN = `node ${SCAN_SCRIPT} "apps/\${APP}/dist/server"`;
@@ -129,7 +170,18 @@ const APP_COPY = `COPY --from=build-release /src/apps/\${APP}/dist/server/ /app/
 // app.Dockerfile's allowlisted copy beside the bundle (ops/docker/release-allowlist.json), which its
 // test and release stages both take, and the db-assets stage's scan of what it copies.
 const APP_DB_COPY = "COPY --from=db-assets /out/db-assets/ /app/db-assets/\n";
-const APP_DB_SCAN = `RUN node ${SCAN_SCRIPT} /out/db-assets\n`;
+const APP_DB_SCAN_STEP = `node ${SCAN_SCRIPT} ${DB_ASSETS_SCAN} /out/db-assets`;
+const APP_DB_SCAN = `RUN ${APP_DB_SCAN_STEP}\n`;
+// The db-assets stage's staging command, the command the allowlisted copy names as what makes it.
+const DB_STAGE_COMMAND = "node packages/db/src/assets-cli.ts stage /out/db-assets";
+const APP_DB_PRODUCE = `RUN ${DB_STAGE_COMMAND}\n`;
+// The database's files by packages/db/src/assets.ts's rule, from the repository's root.
+const DB_ASSET_RULE = [
+  "packages/*/bootstrap/*.sql",
+  "packages/*/migrations/*.sql",
+  "packages/*/grants/*.json",
+  "packages/db/roles/grants/*.json",
+];
 // The generator the api's build:server runs first, which the allowlist names as its one pre-script.
 const AUDIT_GEN = "node ../../packages/audit/src/gen.ts";
 // connector.Dockerfile's release stage's copies: cloudflared from its image's stage, and the output.
@@ -426,12 +478,21 @@ describe("a changed release build is refused, or followed", () => {
     );
   });
 
+  // The stages under the build stage are the pinned base, whose ENV is its two names alone (an ENV
+  // planted there is refused: "the stages the bundle's build stage is built on"), so the build
+  // stage's own ENV is the one that may set more.
   it("an environment the Dockerfile sets reaches the build", () => {
     const images = imageBuilds(
       plantRepository((files) =>
-        replace(files, APP_DOCKERFILE, "    CI=1\n", "    CI=1 \\\n    NODE_ENV=development\n"),
+        replace(
+          files,
+          APP_DOCKERFILE,
+          "FROM deps AS build-release\nARG APP\n",
+          "FROM deps AS build-release\nARG APP\nENV NODE_ENV=development\n",
+        ),
       ),
     );
+    expect(images.refusals).toEqual([]);
     expect(images.builds.find((build) => build.label === api)?.environment.NODE_ENV).toBe(
       "development",
     );
@@ -542,22 +603,37 @@ describe("a changed release build is refused, or followed", () => {
 });
 
 // The one copy app.Dockerfile's release stage takes beside its bundle, the database's files, is read
-// only because ops/docker/release-allowlist.json names it word for word, and only while the
-// db-assets stage it comes from ends in the image's output scan over exactly what it copies, so
-// every copy the release stage takes is scanned. A second copy the allowlist does not name, the
-// listed one changed in any word or flag, the stage's scan left out, moved, ignored or pointed
-// elsewhere, and an allowlist of any other shape are refused.
+// only because ops/docker/release-allowlist.json names it word for word, for that Dockerfile, and
+// only while the db-assets stage it comes from is exactly the command the allowlist names as making
+// it and then the image's output scan in its database files' mode over exactly what it copies,
+// built on the stage the bundle's build stage is built on (held to the pinned base) and run where
+// that stage runs pnpm, so nothing of the stage's own comes before the scan but that command, and
+// the scan fails the build on anything but the database's files. A second copy the allowlist does
+// not name, the listed one changed in any word or flag or taken in another Dockerfile, the stage's
+// scan left out, moved, ignored, pointed elsewhere or in the bundle's mode, any other step or
+// instruction in the stage (before the scan too: a copy of the harness, a second build, a cd, an
+// ARG, ENV, WORKDIR or SHELL of its own), the staging command changed, another parent or another
+// directory, and an allowlist of any other shape are refused. The command the allowlist names
+// stages nothing but the files of packages/db/src/assets.ts's rule, byte for byte, and none of
+// packages/testing, and the scan passes them.
 describe("the release stage's allowlisted copies", () => {
   const api = `${APP_DOCKERFILE}, APP=api`;
   const twice = `${APP_DOCKERFILE}: its ${RELEASE_STAGE} stage copies 2 times from stages that hold the repository, not once`;
-  const stage = `${APP_DOCKERFILE}: its stage db-assets, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy /out/db-assets/ from,`;
-  const unscanned = `${stage} does not end in a RUN whose last step is \`node ${SCAN_SCRIPT} /out/db-assets\``;
+  const which = `its stage db-assets, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy /out/db-assets/ from,`;
+  const stage = `${APP_DOCKERFILE}: ${which}`;
+  const unscanned = `${stage} does not end in a RUN whose last step is \`${APP_DB_SCAN_STEP}\``;
+  const exactly = `${stage} does not run exactly \`${DB_STAGE_COMMAND}\` and then \`${APP_DB_SCAN_STEP}\`, with no other step`;
+  /** The refusal of an instruction `keyword` of the db-assets stage's own. */
+  const own = (keyword: string) => new RegExp(`^${stage} has ${keyword} on line \\d+$`);
   /** app.Dockerfile with its release stage's allowlisted copy replaced by `to`. */
   const releaseCopy = (to: string) => (files: Map<string, string>) =>
     replace(files, APP_DOCKERFILE, `${APP_COPY}${APP_DB_COPY}`, `${APP_COPY}${to}`);
   /** app.Dockerfile with its db-assets stage's scan replaced by `to`. */
   const dbScan = (to: string) => (files: Map<string, string>) =>
     replace(files, APP_DOCKERFILE, APP_DB_SCAN, to);
+  /** app.Dockerfile with its db-assets stage's instructions (its staging and its scan) replaced. */
+  const dbStage = (to: string) => (files: Map<string, string>) =>
+    replace(files, APP_DOCKERFILE, `${APP_DB_PRODUCE}${APP_DB_SCAN}`, to);
   /** The allowlist, changed by `change`. */
   const allowlist =
     (change: (value: Record<string, unknown>) => void) => (files: Map<string, string>) => {
@@ -574,8 +650,16 @@ describe("the release stage's allowlisted copies", () => {
 
   it("names the database's files and the audit index's generator alone, each with its reason", () => {
     const { copies, preScripts } = readAllowlist(REPOSITORY);
-    expect(copies.map((copy) => [copy.stage, copy.source, copy.destination])).toEqual([
-      ["db-assets", "/out/db-assets/", "/app/db-assets/"],
+    expect(
+      copies.map((copy) => [
+        copy.dockerfile,
+        copy.stage,
+        copy.source,
+        copy.destination,
+        copy.produces,
+      ]),
+    ).toEqual([
+      [APP_DOCKERFILE, "db-assets", "/out/db-assets/", "/app/db-assets/", DB_STAGE_COMMAND],
     ]);
     expect(preScripts.map((pre) => [pre.command, pre.writes])).toEqual([
       [AUDIT_GEN, "packages/audit/src/events/_index.gen.ts"],
@@ -583,18 +667,77 @@ describe("the release stage's allowlisted copies", () => {
     for (const { reason } of [...copies, ...preScripts]) expect(reason.length).toBeGreaterThan(20);
   });
 
-  it("lets the image's db-assets stage's scan pass over the database's files it stages", () => {
+  // The allowlisted command, run as the stage runs it with the copy's source a temporary directory,
+  // stages exactly the files of assets.ts's rule in the source tree, each byte for byte, and nothing
+  // else (packages/db's assets.test.ts holds that rule's files equal to discoverDbAssets's, and the
+  // scan's database files' mode equal to that rule); and the image's scan, in that mode as the stage
+  // runs it, passes over them. What the scan refuses in that mode is in "harness-scan.mjs".
+  it("stages by the allowlisted command nothing but the database's files, which the scan passes", () => {
+    const [entry, ...more] = readAllowlist(REPOSITORY).copies;
+    if (entry === undefined || more.length > 0) throw new Error("the allowlist names not one copy");
+    const [node, ...args] = shellSteps(entry.produces, {})[0] ?? [];
+    expect(node).toBe("node");
+    const source = posix.resolve(entry.source);
+    expect(args.filter((word) => word === source)).toHaveLength(1);
     const out = join(temporary(), "db-assets");
     const staged = spawnSync(
       process.execPath,
-      [join(REPOSITORY, "packages/db/src/assets-cli.ts"), "stage", out],
+      args.map((word) => (word === source ? out : word)),
       { cwd: REPOSITORY, encoding: "utf8", env: { PATH: dirname(process.execPath) } },
     );
-    expect(staged.status).toBe(0);
-    const scan = runHarnessScan(REPOSITORY, out);
+    expect([staged.status, staged.stderr]).toEqual([0, ""]);
+    const files = readdirSync(out, { recursive: true, withFileTypes: true })
+      .filter((each) => !each.isDirectory())
+      .map((each) => relative(out, join(each.parentPath, each.name)).split(sep).join("/"))
+      .sort();
+    const rule = globSync(DB_ASSET_RULE, { cwd: REPOSITORY })
+      .map((path) => path.split(sep).join("/"))
+      .sort();
+    expect(rule.length).toBeGreaterThan(0);
+    expect(files).toEqual(rule);
+    expect(files.filter((file) => file.startsWith("packages/testing/"))).toEqual([]);
+    for (const file of files) {
+      expect(readFileSync(join(out, file)).equals(readFileSync(join(REPOSITORY, file))), file).toBe(
+        true,
+      );
+    }
+    const scan = runHarnessScan(REPOSITORY, out, [DB_ASSETS_SCAN]);
     expect([scan.status, scan.stderr]).toEqual([0, ""]);
-    expect(scan.stdout).toContain("no harness marker");
+    expect(scan.stdout).toContain(
+      `${files.length} file(s), the database's files only, no harness marker`,
+    );
   }, 30_000);
+
+  it("reads the staging command and the scan joined in one RUN", () => {
+    const images = imageBuilds(
+      plantRepository(dbStage(`RUN ${DB_STAGE_COMMAND} && ${APP_DB_SCAN_STEP}\n`)),
+    );
+    expect(images.refusals).toEqual([]);
+    expect(images.builds.map((build) => build.label)).toContain(api);
+  });
+
+  // The allowlist names the copy for app.Dockerfile: the same copy taken in connector.Dockerfile,
+  // from a stage of the same name that stages and scans it as app.Dockerfile's does, is a second
+  // copy from a stage that holds the repository there.
+  it("refuses the listed copy in another Dockerfile, from a stage that stages and scans it", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        replace(
+          files,
+          CONNECTOR_DOCKERFILE,
+          "FROM deps AS build\n",
+          `FROM deps AS db-assets\n${APP_DB_PRODUCE}${APP_DB_SCAN}\nFROM deps AS build\n`,
+        );
+        replace(files, CONNECTOR_DOCKERFILE, CONNECTOR_COPY, `${CONNECTOR_COPY}${APP_DB_COPY}`);
+      }),
+    );
+    expect(images.refusals).toEqual([
+      `${CONNECTOR_DOCKERFILE}: its ${RELEASE_STAGE} stage copies 2 times from stages that hold the repository, not once`,
+    ]);
+    const labels = images.builds.map((build) => build.label);
+    expect(labels).not.toContain(CONNECTOR_DOCKERFILE);
+    expect(labels).toContain(api);
+  });
 
   it.each<[string, (files: Map<string, string>) => void, string | RegExp]>([
     [
@@ -646,18 +789,33 @@ describe("the release stage's allowlisted copies", () => {
     ],
     ["the db-assets stage's scan left out", dbScan(""), unscanned],
     [
+      "the db-assets stage's scan in the bundle's mode, which reads markers alone",
+      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets\n`),
+      unscanned,
+    ],
+    [
+      "the db-assets stage's scan with its mode's flag after the directory",
+      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets ${DB_ASSETS_SCAN}\n`),
+      unscanned,
+    ],
+    [
+      "the db-assets stage's scan with another flag before its mode's",
+      dbScan(`RUN node ${SCAN_SCRIPT} --bundle ${DB_ASSETS_SCAN} /out/db-assets\n`),
+      unscanned,
+    ],
+    [
       "the db-assets stage's scan over another directory",
-      dbScan(`RUN node ${SCAN_SCRIPT} /out\n`),
+      dbScan(`RUN node ${SCAN_SCRIPT} ${DB_ASSETS_SCAN} /out\n`),
       unscanned,
     ],
     [
       "the db-assets stage's scan over a directory inside the copy",
-      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets/packages\n`),
+      dbScan(`RUN node ${SCAN_SCRIPT} ${DB_ASSETS_SCAN} /out/db-assets/packages\n`),
       unscanned,
     ],
     [
       "a step after the db-assets stage's scan",
-      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets && cp -r packages/testing /out/db-assets/\n`),
+      dbScan(`RUN ${APP_DB_SCAN_STEP} && cp -r packages/testing /out/db-assets/\n`),
       unscanned,
     ],
     [
@@ -677,7 +835,7 @@ describe("the release stage's allowlisted copies", () => {
     ],
     [
       "the db-assets stage's scan's failure ignored",
-      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets || true\n`),
+      dbScan(`RUN ${APP_DB_SCAN_STEP} || true\n`),
       new RegExp(
         `^${APP_DOCKERFILE}: \`node .*\` holds \`\\|\`, which the test does not read as a word$`,
       ),
@@ -685,14 +843,123 @@ describe("the release stage's allowlisted copies", () => {
     [
       "the db-assets stage's scan run with a mount over the copy",
       dbScan(
-        `RUN --mount=type=bind,from=deps,source=/src/packages/db,target=/out/db-assets node ${SCAN_SCRIPT} /out/db-assets\n`,
+        `RUN --mount=type=bind,from=deps,source=/src/packages/db,target=/out/db-assets ${APP_DB_SCAN_STEP}\n`,
       ),
       new RegExp(`^${stage} has a RUN on line \\d+ that is not a plain shell command$`),
     ],
     [
       "the db-assets stage's scan in exec form",
-      dbScan(`RUN ["node", "${SCAN_SCRIPT}", "/out/db-assets"]\n`),
+      dbScan(`RUN ["node", "${SCAN_SCRIPT}", "${DB_ASSETS_SCAN}", "/out/db-assets"]\n`),
       new RegExp(`^${stage} has a RUN on line \\d+ that is not a plain shell command$`),
+    ],
+    [
+      "a RUN before the db-assets stage's scan that copies the harness into the copy",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN cp -r packages/testing/src /out/db-assets/harness\n${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "a step before the scan, in the scan's RUN, that copies the harness into the copy",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN cp -r packages/testing/src /out/db-assets/harness && ${APP_DB_SCAN_STEP}\n`,
+      ),
+      exactly,
+    ],
+    [
+      "a test-target build copied into the copy before the db-assets stage's scan",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN FIN_BUILD_TARGET=test pnpm --filter @fin/api run build:server && cp -r apps/api/dist/server /out/db-assets/server\n${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "a migration planted in the copy before the staging command",
+      dbStage(
+        `RUN mkdir -p /out/db-assets/packages/zz/migrations\n${APP_DB_PRODUCE}${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "the staging command replaced by a copy of the repository",
+      dbStage(`RUN mkdir -p /out && cp -r /src /out/db-assets\n${APP_DB_SCAN}`),
+      exactly,
+    ],
+    ["the staging command left out", dbStage(APP_DB_SCAN), exactly],
+    [
+      "the staging command into another directory",
+      dbStage(`RUN ${DB_STAGE_COMMAND}/harness\n${APP_DB_SCAN}`),
+      exactly,
+    ],
+    [
+      "the staging command with a flag added",
+      dbStage(
+        `RUN ${DB_STAGE_COMMAND.replace("node ", "node --import=/src/skip.mjs ")}\n${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "the scan emptied before it runs",
+      dbStage(`${APP_DB_PRODUCE}RUN cp /dev/null ${SCAN_SCRIPT}\n${APP_DB_SCAN}`),
+      exactly,
+    ],
+    [
+      "the scan run from another directory after a cd",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN mkdir -p /tmp/x/ops/docker && cp /dev/null /tmp/x/${SCAN_SCRIPT} && cd /tmp/x && ${APP_DB_SCAN_STEP}\n`,
+      ),
+      exactly,
+    ],
+    [
+      "a WORKDIR of the db-assets stage's own before its scan",
+      dbStage(`${APP_DB_PRODUCE}WORKDIR /tmp/x\n${APP_DB_SCAN}`),
+      own("WORKDIR"),
+    ],
+    [
+      "an ENV of the db-assets stage's own before its scan",
+      dbStage(`${APP_DB_PRODUCE}ENV NODE_OPTIONS=--import=/src/skip.mjs\n${APP_DB_SCAN}`),
+      own("ENV"),
+    ],
+    [
+      "an ARG of the db-assets stage's own, read at its default, in its scan's directory",
+      dbStage(
+        `ARG APP=../../out/db-assets\n${APP_DB_PRODUCE}RUN node ${SCAN_SCRIPT} ${DB_ASSETS_SCAN} "/src/apps/\${APP}"\n`,
+      ),
+      own("ARG"),
+    ],
+    [
+      "a SHELL of the db-assets stage's own",
+      dbStage(`SHELL ["/bin/sh", "-c"]\n${APP_DB_PRODUCE}${APP_DB_SCAN}`),
+      own("SHELL"),
+    ],
+    [
+      "the db-assets stage built on another stage than the bundle's build stage",
+      (files) =>
+        replace(
+          files,
+          APP_DOCKERFILE,
+          "FROM deps AS db-assets\n",
+          "FROM deps AS planted\nRUN mkdir -p packages/zz/migrations\nFROM planted AS db-assets\n",
+        ),
+      `${stage} is built on planted, not on deps, the stage the bundle's build stage build-release is built on`,
+    ],
+    [
+      "the db-assets stage run in another directory than the bundle's build stage",
+      (files) =>
+        replace(
+          files,
+          APP_DOCKERFILE,
+          "FROM deps AS build-release\nARG APP\n",
+          "FROM deps AS build-release\nARG APP\nWORKDIR /\n",
+        ),
+      `${api}: ${which} runs in /src, not in /, where the bundle's build stage build-release runs pnpm`,
+    ],
+    [
+      "the listed copy once the allowlist names it for another Dockerfile",
+      firstCopy((copy) => {
+        copy.dockerfile = CONNECTOR_DOCKERFILE;
+      }),
+      twice,
     ],
     [
       "an allowlist that is missing",
@@ -716,7 +983,56 @@ describe("the release stage's allowlisted copies", () => {
       firstCopy((copy) => {
         delete copy.reason;
       }),
-      `${ALLOWLIST_FILE}: copy 1 holds destination, source, stage, not exactly stage, source, destination, reason`,
+      `${ALLOWLIST_FILE}: copy 1 holds destination, dockerfile, produces, source, stage, not exactly dockerfile, stage, source, destination, produces, reason`,
+    ],
+    [
+      "an allowlisted copy without the command that makes it",
+      firstCopy((copy) => {
+        delete copy.produces;
+      }),
+      `${ALLOWLIST_FILE}: copy 1 holds destination, dockerfile, reason, source, stage, not exactly dockerfile, stage, source, destination, produces, reason`,
+    ],
+    [
+      "an allowlisted copy without its Dockerfile",
+      firstCopy((copy) => {
+        delete copy.dockerfile;
+      }),
+      `${ALLOWLIST_FILE}: copy 1 holds destination, produces, reason, source, stage, not exactly dockerfile, stage, source, destination, produces, reason`,
+    ],
+    [
+      "an allowlisted copy made by two commands",
+      firstCopy((copy) => {
+        copy.produces = `${DB_STAGE_COMMAND} && cp -r packages/testing/src /out/db-assets/`;
+      }),
+      `${ALLOWLIST_FILE}: copy 1's produces, ${JSON.stringify(`${DB_STAGE_COMMAND} && cp -r packages/testing/src /out/db-assets/`)}, is not one command of plain words`,
+    ],
+    [
+      "an allowlisted copy made by a command that expands a variable",
+      firstCopy((copy) => {
+        copy.produces = "node packages/db/src/assets-cli.ts stage $OUT";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's produces, "node packages/db/src/assets-cli.ts stage $OUT", is not one command of plain words`,
+    ],
+    [
+      "an allowlisted copy made by a command that is an assignment first",
+      firstCopy((copy) => {
+        copy.produces = `NODE_OPTIONS=--import=/src/skip.mjs ${DB_STAGE_COMMAND}`;
+      }),
+      `${ALLOWLIST_FILE}: copy 1's produces, ${JSON.stringify(`NODE_OPTIONS=--import=/src/skip.mjs ${DB_STAGE_COMMAND}`)}, is not one command of plain words`,
+    ],
+    [
+      "an allowlisted copy of a Dockerfile outside ops/docker",
+      firstCopy((copy) => {
+        copy.dockerfile = "Dockerfile";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's dockerfile, "Dockerfile", is not a Dockerfile of ops/docker`,
+    ],
+    [
+      "an allowlisted copy of a Dockerfile in a directory under ops/docker",
+      firstCopy((copy) => {
+        copy.dockerfile = "ops/docker/sub/app.Dockerfile";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's dockerfile, "ops/docker/sub/app.Dockerfile", is not a Dockerfile of ops/docker`,
     ],
     [
       "an allowlisted copy whose reason is empty",
@@ -746,6 +1062,864 @@ describe("the release stage's allowlisted copies", () => {
       typeof refusal === "string" ? refusal : expect.stringMatching(refusal),
     );
     expect(images.builds.map((build) => build.label)).not.toContain(api);
+  });
+
+  // The steward's ruling of 22 Nov on the db-assets copy: each of the attacker's variants fails, by
+  // the reader (the Dockerfile planted and read), by the scan of the stage's output (what the stage
+  // would leave, made in a temporary directory and scanned in the database files' mode as the stage
+  // runs it), or by both, as each test's title says. A scan cannot see that it was emptied,
+  // replaced, run elsewhere or run with another environment, so those variants are the reader's
+  // alone; so is a file planted in deps in a folder assets.ts reads, with none of the harness's
+  // markers, which the scan would pass as a migration. The scan's side of each variant holds even
+  // when the staging command itself is changed, which no Dockerfile shows: two variants are the
+  // scan's alone.
+  describe("each variant of the steward's ruling", () => {
+    const INSTALL = "RUN pnpm install --offline --frozen-lockfile\n";
+    /** app.Dockerfile with `line` planted in deps, after its last instruction. */
+    const inDeps = (line: string) => (files: Map<string, string>) =>
+      replace(files, APP_DOCKERFILE, INSTALL, `${INSTALL}${line}\n`);
+    const base = (keyword: string) =>
+      new RegExp(
+        `^${literal(APP_DOCKERFILE)}: its base stage deps has ${keyword} on line \\d+, after the pinned base's last instruction$`,
+      );
+    /** What the allowlisted command stages, in a new directory: the database's files. */
+    const staged = (): string => {
+      const out = join(temporary(), "db-assets");
+      const run = spawnSync(
+        process.execPath,
+        [join(REPOSITORY, "packages/db/src/assets-cli.ts"), "stage", out],
+        { cwd: REPOSITORY, encoding: "utf8", env: { PATH: dirname(process.execPath) } },
+      );
+      if (run.status !== 0) throw new Error(`the staging command failed: ${run.stderr}`);
+      return out;
+    };
+    /** `out` with each of `files` (a path in it to its text) written in it. */
+    const plus = (out: string, files: Readonly<Record<string, string>>): string => {
+      writeFiles(out, new Map(Object.entries(files)));
+      return out;
+    };
+    /** `out` with the repository's files `paths` (files or directories) copied to `to` in it. */
+    const copied = (out: string, paths: Readonly<Record<string, string>>): string => {
+      for (const [path, to] of Object.entries(paths)) {
+        cpSync(join(REPOSITORY, path), join(out, to), { recursive: true });
+      }
+      return out;
+    };
+    const none = "which is none of the database's files (.sql and .json files only)";
+    const outside =
+      "a file outside the database's folders (packages/<package>/bootstrap, migrations or grants, and packages/db/roles/grants)";
+    const harness =
+      "a path of the test harness (packages/testing), which only the test target may hold";
+    const ENTRYPOINT = 'ENTRYPOINT ["/nodejs/bin/node", "/app/db-assets/server/main.js"]\n';
+    const TEST_BUNDLE = "// ../../packages/testing/src/totp.ts\nexport const totp = 1;\n";
+
+    interface Reader {
+      change: (files: Map<string, string>) => void;
+      refusal: string | RegExp;
+      label?: string;
+    }
+    interface Scan {
+      output: () => string;
+      file: string;
+      what: string;
+    }
+    const variant = (name: string, reader: Reader | undefined, scan: Scan | undefined) => ({
+      title: `${name}: refused by ${
+        reader !== undefined && scan !== undefined
+          ? "the reader and the scan"
+          : reader !== undefined
+            ? "the reader"
+            : "the scan"
+      }`,
+      reader,
+      scan,
+    });
+
+    it.each([
+      variant(
+        "(1) the harness's sources copied into the copy between the stage's RUNs",
+        {
+          change: dbStage(
+            `${APP_DB_PRODUCE}RUN cp -r packages/testing/src /out/db-assets/harness\n${APP_DB_SCAN}`,
+          ),
+          refusal: exactly,
+        },
+        {
+          output: () => copied(staged(), { "packages/testing/src": "harness" }),
+          file: "harness/totp.ts",
+          what: `a .ts file, ${none}`,
+        },
+      ),
+      variant(
+        "(2) a test-target bundle copied into the copy, with an ENTRYPOINT that starts it",
+        {
+          change: (files) => {
+            dbStage(
+              `${APP_DB_PRODUCE}RUN FIN_BUILD_TARGET=test pnpm --filter @fin/api run build:server && cp -r apps/api/dist/server /out/db-assets/server\n${APP_DB_SCAN}`,
+            )(files);
+            releaseCopy(`${APP_DB_COPY}${ENTRYPOINT}`)(files);
+          },
+          refusal: exactly,
+        },
+        {
+          output: () =>
+            plus(staged(), { "server/main.js": TEST_BUNDLE, "server/main.js.map": "{}" }),
+          file: "server/main.js",
+          what: `a .js file, ${none}`,
+        },
+      ),
+      variant(
+        "(2) that ENTRYPOINT alone",
+        {
+          change: releaseCopy(`${APP_DB_COPY}${ENTRYPOINT}`),
+          refusal: new RegExp(`^${literal(api)}: its release stage has ENTRYPOINT on line \\d+$`),
+        },
+        undefined,
+      ),
+      variant(
+        "(3) the staging command replaced by a copy of the repository",
+        {
+          change: dbStage(`RUN mkdir -p /out && cp -r /src /out/db-assets\n${APP_DB_SCAN}`),
+          refusal: exactly,
+        },
+        {
+          output: () =>
+            copied(staged(), {
+              "package.json": "package.json",
+              "packages/db/src/assets.ts": "packages/db/src/assets.ts",
+              "packages/testing/src/totp.ts": "packages/testing/src/totp.ts",
+            }),
+          file: "packages/testing/src/totp.ts",
+          what: harness,
+        },
+      ),
+      variant(
+        "(4) the scan emptied before it runs, in the stage",
+        {
+          change: dbStage(`${APP_DB_PRODUCE}RUN cp /dev/null ${SCAN_SCRIPT}\n${APP_DB_SCAN}`),
+          refusal: exactly,
+        },
+        undefined,
+      ),
+      variant(
+        "(4) the scan emptied before it runs, in deps",
+        { change: inDeps(`RUN cp /dev/null ${SCAN_SCRIPT}`), refusal: base("RUN") },
+        undefined,
+      ),
+      variant(
+        "(5) the scan run from another WORKDIR",
+        {
+          change: dbStage(`${APP_DB_PRODUCE}WORKDIR /tmp/x\n${APP_DB_SCAN}`),
+          refusal: own("WORKDIR"),
+        },
+        undefined,
+      ),
+      variant(
+        "(5) the scan run after a cd to a copied scanner",
+        {
+          change: dbStage(
+            `${APP_DB_PRODUCE}RUN mkdir -p /tmp/x/ops/docker && cp /dev/null /tmp/x/${SCAN_SCRIPT} && cd /tmp/x && ${APP_DB_SCAN_STEP}\n`,
+          ),
+          refusal: exactly,
+        },
+        undefined,
+      ),
+      variant(
+        "(6) NODE_OPTIONS set by an ENV of the stage before the scan",
+        {
+          change: dbStage(
+            `${APP_DB_PRODUCE}ENV NODE_OPTIONS=--import=/src/skip.mjs\n${APP_DB_SCAN}`,
+          ),
+          refusal: own("ENV"),
+        },
+        undefined,
+      ),
+      variant(
+        "(6) NODE_OPTIONS set on the scan's step",
+        {
+          change: dbScan(`RUN NODE_OPTIONS=--import=/src/skip.mjs ${APP_DB_SCAN_STEP}\n`),
+          refusal: unscanned,
+        },
+        undefined,
+      ),
+      variant(
+        "(6) NODE_OPTIONS exported by a step before the scan",
+        {
+          change: dbScan(`RUN export NODE_OPTIONS=--import=/src/skip.mjs && ${APP_DB_SCAN_STEP}\n`),
+          refusal: exactly,
+        },
+        undefined,
+      ),
+      variant(
+        "(6) NODE_OPTIONS set by an ENV in deps",
+        { change: inDeps("ENV NODE_OPTIONS=--import=/src/skip.mjs"), refusal: base("ENV") },
+        undefined,
+      ),
+      variant(
+        "(6) NODE_OPTIONS set by an ARG in deps, which Docker passes on",
+        {
+          change: inDeps("ARG NODE_OPTIONS=--import=/src/ops/docker/skip.mjs"),
+          refusal: new RegExp(
+            `^${literal(APP_DOCKERFILE)}: ARG on line \\d+ is in deps, which db-assets is built on: Docker passes it on to the stages built on deps, which the test does not read$`,
+          ),
+        },
+        undefined,
+      ),
+      variant(
+        "(7) an ARG's default in the scan's directory, which the build's APP replaces",
+        {
+          change: dbStage(
+            `ARG APP=../../out/db-assets\n${APP_DB_PRODUCE}RUN node ${SCAN_SCRIPT} ${DB_ASSETS_SCAN} "/src/apps/\${APP}"\n`,
+          ),
+          refusal: own("ARG"),
+        },
+        undefined,
+      ),
+      variant(
+        "(8) a stage named db-assets in connector.Dockerfile that never runs assets-cli",
+        {
+          change: (files) => {
+            replace(
+              files,
+              CONNECTOR_DOCKERFILE,
+              "FROM deps AS build\n",
+              `FROM deps AS db-assets\nRUN mkdir -p /out/db-assets && cp -r packages/testing/src /out/db-assets/harness\n${APP_DB_SCAN}\nFROM deps AS build\n`,
+            );
+            replace(files, CONNECTOR_DOCKERFILE, CONNECTOR_COPY, `${CONNECTOR_COPY}${APP_DB_COPY}`);
+          },
+          refusal: `${CONNECTOR_DOCKERFILE}: its ${RELEASE_STAGE} stage copies 2 times from stages that hold the repository, not once`,
+          label: CONNECTOR_DOCKERFILE,
+        },
+        {
+          output: () => {
+            const out = join(temporary(), "db-assets");
+            mkdirSync(out);
+            return copied(out, { "packages/testing/src": "harness" });
+          },
+          file: "harness/totp.ts",
+          what: `a .ts file, ${none}`,
+        },
+      ),
+      variant(
+        "a migration planted in the copy under a folder assets.ts does not know",
+        {
+          change: dbStage(
+            `${APP_DB_PRODUCE}RUN mkdir -p /out/db-assets/packages/db/seeds && cp packages/db/migrations/20261121101000_audit_core.sql /out/db-assets/packages/db/seeds/20990101000000_seed.sql\n${APP_DB_SCAN}`,
+          ),
+          refusal: exactly,
+        },
+        {
+          output: () =>
+            plus(staged(), {
+              "packages/db/seeds/20990101000000_seed.sql":
+                "grant all on all tables in schema public to public;\n",
+            }),
+          file: "packages/db/seeds/20990101000000_seed.sql",
+          what: outside,
+        },
+      ),
+      variant(
+        "the harness planted in deps as a migration in a folder assets.ts reads",
+        {
+          change: inDeps(
+            "RUN mkdir -p packages/zz/migrations && cp packages/testing/src/totp.ts packages/zz/migrations/20990101000000_zz_totp.sql",
+          ),
+          refusal: base("RUN"),
+        },
+        undefined,
+      ),
+      variant(
+        "a migration of packages/testing in the repository, which assets.ts's rule would stage",
+        undefined,
+        {
+          output: () =>
+            plus(staged(), {
+              "packages/testing/migrations/20990101000000_testing_seed.sql":
+                "insert into staff (email) values ('planted@example.org');\n",
+            }),
+          file: "packages/testing/migrations/20990101000000_testing_seed.sql",
+          what: harness,
+        },
+      ),
+      variant("the staging command changed to stage the harness's sources too", undefined, {
+        output: () => copied(staged(), { "packages/testing/src": "packages/testing/src" }),
+        file: "packages/testing/src/totp.ts",
+        what: harness,
+      }),
+    ])(
+      "$title",
+      ({ reader, scan }) => {
+        if (reader !== undefined) {
+          const images = imageBuilds(plantRepository(reader.change));
+          expect(images.refusals).toContainEqual(
+            typeof reader.refusal === "string"
+              ? reader.refusal
+              : expect.stringMatching(reader.refusal),
+          );
+          expect(images.builds.map((build) => build.label)).not.toContain(reader.label ?? api);
+        }
+        if (scan !== undefined) {
+          const out = scan.output();
+          const result = runHarnessScan(REPOSITORY, out, [DB_ASSETS_SCAN]);
+          expect(result.status).toBe(1);
+          expect(result.stderr.split("\n")).toContain(
+            `harness-scan: ${out}/${scan.file}: ${scan.what}`,
+          );
+        }
+      },
+      30_000,
+    );
+  });
+});
+
+// The stages under each Dockerfile's bundle build stage (deps), and so under app.Dockerfile's
+// db-assets stage, are the pinned base, word for word: a RUN, a step, an ENV (NODE_OPTIONS, PATH,
+// BASH_ENV, ENV or a name added to the base's), an ARG, an ADD, a COPY or any other instruction
+// planted there is refused, and so are a base image that is not Node's by digest, pnpm from
+// anywhere but its release asset, and a script of the workspace's manifests that the base's pnpm
+// install runs (a package listed after a comment line and a blank line included, as pnpm installs
+// it). Each would run before the database files' scan and the bundle's, so it could empty
+// or replace a scan or the staging command, set what Node or the shell reads, or plant a file in a
+// folder assets.ts stages (which the database files' scan, reading folders and extensions, would
+// pass: only the reader refuses that one).
+describe.each([
+  { dockerfile: APP_DOCKERFILE, label: `${APP_DOCKERFILE}, APP=api` },
+  { dockerfile: CONNECTOR_DOCKERFILE, label: CONNECTOR_DOCKERFILE },
+])("$dockerfile: the stages the bundle's build stage is built on", ({ dockerfile, label }) => {
+  const INSTALL = "RUN pnpm install --offline --frozen-lockfile\n";
+  const PNPM_ASSET =
+    "https://github.com/pnpm/pnpm/releases/download/v12.21.0/pnpm-linux-x64.tar.gz";
+  /** The Dockerfile with `line` after the base's last instruction. */
+  const after = (line: string) => (files: Map<string, string>) =>
+    replace(files, dockerfile, INSTALL, `${INSTALL}${line}\n`);
+  /** The Dockerfile with its deps stage's FROM line replaced by `to`. */
+  const from = (to: string) => (files: Map<string, string>) => {
+    const text = files.get(dockerfile) ?? "";
+    const line = /^FROM (\S+) AS deps$/m.exec(text);
+    if (line === null) throw new Error(`${dockerfile} has no deps stage`);
+    files.set(
+      dockerfile,
+      text.replace(line[0], () => to.replace("<image>", line[1] ?? "")),
+    );
+  };
+  /** The refusal of an instruction `keyword` after the pinned base's last. */
+  const appended = (keyword: string) =>
+    new RegExp(
+      `^its base stage deps has ${keyword} on line \\d+, after the pinned base's last instruction$`,
+    );
+  /** The refusal of an instruction where the pinned base has one that begins with `expected`. */
+  const differs = (stage: string, expected: string) =>
+    new RegExp(
+      `^its base stage ${stage} has \`.*\` on line \\d+, where the pinned base has \`${literal(expected)}.*\`$`,
+    );
+
+  it.each<[string, (files: Map<string, string>) => void, RegExp]>([
+    ["a RUN that empties the scan", after(`RUN cp /dev/null ${SCAN_SCRIPT}`), appended("RUN")],
+    [
+      "a RUN that replaces the database files' staging command",
+      after("RUN cp ops/docker/evil.ts packages/db/src/assets-cli.ts"),
+      appended("RUN"),
+    ],
+    [
+      "a RUN that plants the harness as a migration in a folder assets.ts reads",
+      after(
+        "RUN mkdir -p packages/zz/migrations && cp packages/testing/src/totp.ts packages/zz/migrations/20990101000000_zz_totp.sql",
+      ),
+      appended("RUN"),
+    ],
+    [
+      "a RUN that plants a migration in a folder assets.ts does not read",
+      after(
+        "RUN mkdir -p packages/db/seeds && cp packages/db/migrations/20261121101000_audit_core.sql packages/db/seeds/20990101000000_seed.sql",
+      ),
+      appended("RUN"),
+    ],
+    ["an ENV of NODE_OPTIONS", after("ENV NODE_OPTIONS=--import=/src/skip.mjs"), appended("ENV")],
+    [
+      "an ENV of PATH",
+      after("ENV PATH=/src/fakebin:/usr/local/bin:/usr/bin:/bin"),
+      appended("ENV"),
+    ],
+    ["an ENV of BASH_ENV", after("ENV BASH_ENV=/src/evil.sh"), appended("ENV")],
+    ["an ENV of ENV", after("ENV ENV=/src/evil.sh"), appended("ENV")],
+    [
+      "a name added to the base's ENV",
+      (files) =>
+        replace(
+          files,
+          dockerfile,
+          "    CI=1\n",
+          "    CI=1 \\\n    NODE_OPTIONS=--import=/src/skip.mjs\n",
+        ),
+      differs("deps", "ENV TURBO_TELEMETRY_DISABLED=1 CI=1"),
+    ],
+    [
+      "an ARG of NODE_OPTIONS, which Docker passes on to the stages built on deps",
+      after("ARG NODE_OPTIONS=--import=/src/ops/docker/skip.mjs"),
+      /^(?:its base stage deps has ARG on line \d+, after the pinned base's last instruction|ARG on line \d+ is in deps, which db-assets is built on: Docker passes it on to the stages built on deps, which the test does not read)$/,
+    ],
+    [
+      "a COPY from the build context",
+      after("COPY packages/testing/src/totp.ts packages/zz/migrations/20990101000000_zz_totp.sql"),
+      appended("COPY"),
+    ],
+    [
+      "an ADD over the scan",
+      after(
+        `ADD --checksum=sha256:${"0".repeat(64)} https://example.org/x.mjs /src/${SCAN_SCRIPT}`,
+      ),
+      appended("ADD"),
+    ],
+    ["another instruction", after("USER nobody"), appended("USER")],
+    [
+      "a step added to the install's RUN",
+      (files) =>
+        replace(
+          files,
+          dockerfile,
+          INSTALL,
+          `${INSTALL.trimEnd()} && cp /dev/null ${SCAN_SCRIPT}\n`,
+        ),
+      differs("deps", "RUN pnpm install --offline --frozen-lockfile"),
+    ],
+    [
+      "pnpm from another URL",
+      (files) =>
+        replace(files, dockerfile, PNPM_ASSET, "https://example.org/pnpm-linux-x64.tar.gz"),
+      differs("deps", "ADD --checksum=sha256:<hash> https://github.com/pnpm/pnpm/"),
+    ],
+    [
+      "pnpm's asset added over the scan",
+      (files) =>
+        replace(
+          files,
+          dockerfile,
+          `${PNPM_ASSET} /tmp/pnpm.tar.gz`,
+          `${PNPM_ASSET} /src/${SCAN_SCRIPT}`,
+        ),
+      differs("deps", "ADD --checksum=sha256:<hash> https://github.com/pnpm/pnpm/"),
+    ],
+    [
+      "a base image not pinned by digest",
+      from("FROM node:26 AS deps"),
+      /^its base stage deps is built on node:26, not on Node's image pinned by digest$/,
+    ],
+    [
+      "another image pinned by digest",
+      from(`FROM example.org/node@sha256:${"a".repeat(64)} AS deps`),
+      /^its base stage deps is built on example\.org\/node@sha256:a{64}, not on Node's image pinned by digest$/,
+    ],
+    [
+      "a stage under deps that runs a command first",
+      from(`FROM <image> AS base\nRUN cp /dev/null ${SCAN_SCRIPT}\nFROM base AS deps`),
+      differs("base", 'SHELL ["/bin/bash"'),
+    ],
+    [
+      "a script of the root's manifest that pnpm's install runs",
+      (files) =>
+        files.set(
+          "package.json",
+          JSON.stringify({
+            name: "fin-next",
+            scripts: { postinstall: `cp /dev/null ${SCAN_SCRIPT}` },
+          }),
+        ),
+      /^package\.json has a postinstall script, which the base's pnpm install runs$/,
+    ],
+    [
+      "a script of an app's manifest that pnpm's install runs",
+      (files) => setScripts(files, "api", { prepare: `cp /dev/null ${SCAN_SCRIPT}` }),
+      /^apps\/api\/package\.json has a prepare script, which the base's pnpm install runs$/,
+    ],
+    [
+      "a script pnpm's install runs of a package the workspace lists after others",
+      (files) => plantMonitoring(files, EMPTIES_SCAN),
+      /^ops\/monitoring\/package\.json has a postinstall script, which the base's pnpm install runs$/,
+    ],
+    [
+      "that script with a comment line and a blank line before the package's line in the list",
+      (files) => {
+        plantMonitoring(files, EMPTIES_SCAN);
+        replace(
+          files,
+          "pnpm-workspace.yaml",
+          MONITORING_ITEM,
+          `  # operations\n\n${MONITORING_ITEM}`,
+        );
+      },
+      /^ops\/monitoring\/package\.json has a postinstall script, which the base's pnpm install runs$/,
+    ],
+  ])("refuses %s", (_name, change, refusal) => {
+    const images = imageBuilds(plantRepository(change));
+    const prefix = `${dockerfile}: `;
+    const refusals = images.refusals
+      .filter((each) => each.startsWith(prefix))
+      .map((each) => each.slice(prefix.length));
+    expect(refusals).toContainEqual(expect.stringMatching(refusal));
+    expect(images.builds.map((build) => build.label)).not.toContain(label);
+  });
+});
+
+// pnpm-workspace.yaml's packages list, which says whose manifests the base's pnpm install reads (and
+// so runs the install scripts of), is read as YAML, and so pnpm, reads it in the subset
+// supply-chain:check accepts: a blank or comment-only line inside the list, a trailing comment and
+// a quoted item hide no package after them, and a line of the list the reader cannot read (an
+// indentless item, which pnpm reads too, a flow list, a nested or odd item, a tab, a no-break
+// space, which YAML reads as part of a scalar) refuses every build rather than ending the list
+// there. vitest.config.ts's copy of the reader agrees on each.
+describe("pnpm-workspace.yaml's packages list", () => {
+  const WORKSPACE = "pnpm-workspace.yaml";
+  const workspace = readFileSync(join(REPOSITORY, WORKSPACE), "utf8");
+  // The list as the repository writes it, and the text from its key to its last item.
+  const GLOBS = [
+    "apps/*",
+    "packages/*",
+    "tools/fin-review",
+    "tools/static-deploy",
+    "ops/fin",
+    "ops/monitoring",
+    "ops/watcher",
+    "ops/backup",
+  ];
+  const LIST = `packages:\n${GLOBS.map((glob) => `  - ${glob}\n`).join("")}`;
+
+  /** What `read` gives for `text`: its globs, or the message it refuses the text with. */
+  const outcome = (read: (text: string) => string[], text: string): string[] | string => {
+    try {
+      return read(text);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+  /** The globs both readers give for `text`, which must agree. */
+  const read = (text: string): string[] | string => {
+    const ours = outcome(workspaceGlobs, text);
+    expect(outcome(vitestWorkspaceGlobs, text)).toEqual(ours);
+    return ours;
+  };
+
+  it("reads the repository's list", () => {
+    expect(workspace.startsWith(LIST)).toBe(true);
+    expect(read(workspace)).toEqual(GLOBS);
+  });
+
+  it.each<[string, string]>([
+    ["a comment line before an item", "  # operations\n  - ops/monitoring\n"],
+    ["a blank line before an item", "\n  - ops/monitoring\n"],
+    ["a comment line and a blank line", "  # operations\n\n  - ops/monitoring\n"],
+    ["a comment line at column 0", "# operations\n  - ops/monitoring\n"],
+    ["a line of white space", "   \n  - ops/monitoring\n"],
+    ["a trailing comment", "  - ops/monitoring   # operations\n"],
+    ["a single-quoted item", "  - 'ops/monitoring'\n"],
+    ["a double-quoted item with a trailing comment", '  - "ops/monitoring" # ops\n'],
+    ["two spaces after the dash", "  -  ops/monitoring\n"],
+    ["a line of tabs", "\t\t\n  - ops/monitoring\n"],
+    ["a tab before a trailing comment", "  - ops/monitoring\t# operations\n"],
+  ])("reads every item after %s", (_name, item) => {
+    expect(read(workspace.replace(MONITORING_ITEM, item))).toEqual(GLOBS);
+  });
+
+  it("reads a comment on the key's line, a comment after the list and a CRLF file", () => {
+    const text = workspace
+      .replace("packages:\n", "packages:   # the workspace\n")
+      .replace("  - ops/backup\n", "  - ops/backup\n  # end of the list\n\n");
+    expect(read(text)).toEqual(GLOBS);
+    expect(read(text.replaceAll("\n", "\r\n"))).toEqual(GLOBS);
+  });
+
+  it("reads a list at another indentation, and a file without the key as no list", () => {
+    expect(read(LIST.replaceAll("  - ", "    - "))).toEqual(GLOBS);
+    expect(read("strictDepBuilds: true\n")).toEqual([]);
+  });
+
+  it.each<[string, string, string]>([
+    [
+      "an indentless item, which pnpm reads as the list's",
+      "- ops/monitoring\n",
+      "line 7 is not a top-level key the reader reads",
+    ],
+    [
+      "an item at another indentation",
+      "   - ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a line under an item, which YAML reads as the item's",
+      "  - ops/monitoring\n    ops/zz\n",
+      "line 8, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a tab before the item",
+      "\t- ops/monitoring\n",
+      "line 7 is not a top-level key the reader reads",
+    ],
+    [
+      "a tab after the dash",
+      "  -\tops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "an empty item",
+      "  -\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a nested list",
+      "  - - ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a map item",
+      "  - path: ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a negated glob",
+      "  - '!ops/monitoring'\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a glob with a brace",
+      "  - ops/{monitoring,zz}\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a double-quoted item with an escape",
+      '  - "ops/monitor\\x69ng"\n',
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "an item YAML reads as a boolean",
+      "  - true\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a block scalar",
+      "  - |\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "an anchor",
+      "  - &a ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    // White space is YAML's (a space or a tab): to pnpm a no-break space after a glob is part of
+    // it, so `ops/monitoring` and a NBSP selects a folder of that name, not ops/monitoring; one
+    // before a `#` starts no comment; and a line of one is not blank.
+    [
+      "a no-break space after the item",
+      "  - ops/monitoring\u00a0\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a no-break space before a #",
+      "  - ops/monitoring\u00a0# operations\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a line of a no-break space in the list",
+      "  \u00a0\n  - ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a line of a no-break space at column 0",
+      "\u00a0\n  - ops/monitoring\n",
+      "line 7 is not a top-level key the reader reads",
+    ],
+  ])("refuses %s", (_name, item, message) => {
+    expect(read(workspace.replace(MONITORING_ITEM, item))).toBe(`${WORKSPACE}: ${message}`);
+  });
+
+  it.each<[string, string, string]>([
+    [
+      "a flow list",
+      "packages: [apps/*, ops/monitoring]\n",
+      "line 1 gives packages a value on its line, not a block list",
+    ],
+    [
+      "a second packages key",
+      `${LIST}packages:\n  - ops/zz\n`,
+      "line 10 holds the packages key a second time",
+    ],
+    [
+      "a quoted second packages key",
+      `${LIST}"packages" :\n  - ops/zz\n`,
+      "line 10 holds the packages key a second time",
+    ],
+    [
+      "a complex key",
+      "? packages\n:\n  - ops/zz\n",
+      "line 1 is not a top-level key the reader reads",
+    ],
+    ["a document marker", `---\n${LIST}`, "line 1 is not a top-level key the reader reads"],
+    [
+      "an indented line before any key",
+      `  - ops/zz\n${LIST}`,
+      "line 1 is indented under no top-level key",
+    ],
+    [
+      "a key with an anchor",
+      `&a packages:\n  - ops/zz\n`,
+      "line 1 is not a top-level key the reader reads",
+    ],
+  ])("refuses %s", (_name, text, message) => {
+    expect(read(text)).toBe(`${WORKSPACE}: ${message}`);
+  });
+
+  it("refuses every build when the list holds a line the reader cannot read", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        plantMonitoring(files, EMPTIES_SCAN);
+        replace(files, WORKSPACE, MONITORING_ITEM, "- ops/monitoring\n");
+      }),
+    );
+    expect(images).toEqual({
+      builds: [],
+      refusals: [`${WORKSPACE}: line 7 is not a top-level key the reader reads`],
+      skipped: [],
+    });
+  });
+
+  it("builds each image when comment and blank lines go before a package with no install script", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        plantMonitoring(files);
+        replace(files, WORKSPACE, MONITORING_ITEM, `  # operations\n\n${MONITORING_ITEM}`);
+      }),
+    );
+    expect(images.refusals).toEqual([]);
+    expect(images.builds.map((build) => build.label)).toEqual(
+      imageBuilds(REPOSITORY).builds.map((build) => build.label),
+    );
+  });
+
+  // A comment line and a blank line before the package's line, and the same list without them,
+  // are refused in the stages under each Dockerfile's bundle build stage, above.
+  it.each<[string, string, string]>([
+    ["a trailing comment on the line before", "  - ops/fin\n", "  - ops/fin # operations\n"],
+    ["a quoted item", MONITORING_ITEM, "  - 'ops/monitoring'\n"],
+  ])(
+    "refuses an install script of a package listed after %s, in every Dockerfile",
+    (_name, from, to) => {
+      const images = imageBuilds(
+        plantRepository((files) => {
+          plantMonitoring(files, EMPTIES_SCAN);
+          replace(files, WORKSPACE, from, to);
+        }),
+      );
+      const refusal =
+        "ops/monitoring/package.json has a postinstall script, which the base's pnpm install runs";
+      expect(images.builds).toEqual([]);
+      expect(images.refusals).toEqual([
+        `${APP_DOCKERFILE}: ${refusal}`,
+        `${CONNECTOR_DOCKERFILE}: ${refusal}`,
+      ]);
+    },
+  );
+});
+
+// How each Dockerfile's release stage starts its image: the run image's entrypoint, node, runs the
+// stage's one CMD, which is Node flags the reader knows and then the bundle's main.js. An
+// ENTRYPOINT or a HEALTHCHECK (either could start something else, such as a bundle planted beside
+// the database's files), an ENV that sets a NODE_* variable, a CMD that starts another file, gives
+// another flag or is not in exec form, no CMD or two, and a parent stage's ENTRYPOINT, CMD or ARG
+// are refused.
+describe.each([
+  { dockerfile: APP_DOCKERFILE, label: `${APP_DOCKERFILE}, APP=api`, copy: APP_COPY },
+  { dockerfile: CONNECTOR_DOCKERFILE, label: CONNECTOR_DOCKERFILE, copy: CONNECTOR_COPY },
+])("$dockerfile's release stage starts its bundle alone", ({ dockerfile, label, copy }) => {
+  const CMD =
+    'CMD ["--max-old-space-size-percentage=70", "--disable-proto=throw", "--enable-source-maps", "dist/main.js"]\n';
+  /** `text` with `from`, which it must hold once, replaced by `to`. */
+  const swap = (text: string, from: string, to: string): string => {
+    if (text.split(from).length !== 2) throw new Error(`${dockerfile} does not hold ${from} once`);
+    return text.replace(from, () => to);
+  };
+  /** The release stage's CMD (the file's last) replaced by `to`. */
+  const cmd = (to: string) => (text: string) => {
+    const at = text.lastIndexOf(CMD);
+    if (at === -1 || !text.endsWith(CMD)) throw new Error(`${dockerfile} does not end in ${CMD}`);
+    return `${text.slice(0, at)}${to}`;
+  };
+  /** `lines` after the release stage's copy of the bundle. */
+  const second = (lines: string) => (text: string) => swap(text, copy, `${copy}${lines}`);
+  /** The release stage built on `runtime`, a stage of `lines` on the release stage's own image. */
+  const parent = (lines: string) => (text: string) =>
+    swap(text, " AS release\n", ` AS runtime\n${lines}FROM runtime AS release\n`);
+  const PLANTED = '["/nodejs/bin/node", "/app/db-assets/server/main.js"]';
+
+  it.each<[string, (text: string) => string, RegExp]>([
+    [
+      "an ENTRYPOINT that starts a bundle planted beside the database's files",
+      second(`ENTRYPOINT ${PLANTED}\n`),
+      /^its release stage has ENTRYPOINT on line \d+$/,
+    ],
+    [
+      "a HEALTHCHECK that runs a planted file",
+      second(`HEALTHCHECK CMD ${PLANTED}\n`),
+      /^its release stage has HEALTHCHECK on line \d+$/,
+    ],
+    [
+      "an ENV of NODE_OPTIONS",
+      second("ENV NODE_OPTIONS=--import=/app/db-assets/server/main.js\n"),
+      /^its release stage sets NODE_OPTIONS on line \d+, which Node reads$/,
+    ],
+    [
+      "an ENV of NODE_OPTIONS in the older form",
+      second("ENV NODE_OPTIONS --import=/app/db-assets/server/main.js\n"),
+      /^its release stage sets NODE_OPTIONS on line \d+, which Node reads$/,
+    ],
+    [
+      "a CMD that starts another file",
+      cmd('CMD ["--enable-source-maps", "db-assets/server/main.js"]\n'),
+      /^its release stage's CMD on line \d+ starts "db-assets\/server\/main\.js", not \/app\/dist\/main\.js, the bundle's main\.js$/,
+    ],
+    [
+      "a CMD with a flag that loads a module",
+      cmd('CMD ["--import=/app/db-assets/x.mjs", "dist/main.js"]\n'),
+      /^its release stage's CMD on line \d+ gives Node "--import=\/app\/db-assets\/x\.mjs", which the test does not read$/,
+    ],
+    [
+      "a CMD of a flag alone",
+      cmd('CMD ["--enable-source-maps"]\n'),
+      /^its release stage's CMD on line \d+ starts "--enable-source-maps", not \/app\/dist\/main\.js, the bundle's main\.js$/,
+    ],
+    [
+      "a CMD in shell form",
+      cmd("CMD node dist/main.js\n"),
+      /^its release stage's CMD on line \d+ is not in exec form$/,
+    ],
+    ["no CMD", cmd(""), /^its release stage has 0 CMD instructions, not one$/],
+    [
+      "a second CMD",
+      cmd(`${CMD}CMD ["dist/main.js"]\n`),
+      /^its release stage has 2 CMD instructions, not one$/,
+    ],
+    [
+      "a parent stage's ENTRYPOINT",
+      parent(`ENTRYPOINT ${PLANTED}\n`),
+      /^runtime, which its release stage is built on, has ENTRYPOINT on line \d+$/,
+    ],
+    [
+      "a parent stage's CMD",
+      parent('CMD ["db-assets/server/main.js"]\n'),
+      /^runtime, which its release stage is built on, has CMD on line \d+$/,
+    ],
+    [
+      "a parent stage's ARG, which Docker passes on to the release stage",
+      parent("ARG APP=../../../src/packages/testing\n"),
+      /^ARG on line \d+ is in runtime, which release is built on: Docker passes it on to the stages built on runtime, which the test does not read$/,
+    ],
+  ])("refuses %s", (_name, change, refusal) => {
+    const images = imageBuilds(
+      plantRepository((files) => files.set(dockerfile, change(files.get(dockerfile) ?? ""))),
+    );
+    const prefix = `${label}: `;
+    const refusals = images.refusals
+      .filter((each) => each.startsWith(prefix))
+      .map((each) => each.slice(prefix.length));
+    expect(refusals).toContainEqual(expect.stringMatching(refusal));
+    expect(images.builds.map((build) => build.label)).not.toContain(label);
   });
 });
 
@@ -989,8 +2163,9 @@ describe("harness-scan.mjs", () => {
     return dir;
   };
   // An honest bundle as this build's Vite writes one (a `// <path>` comment before each module's
-  // code), with a `//#region` as bundle-check reads one, a comment that names the harness's
-  // directory in a sentence, and a string that names another package's testing subpath.
+  // code), with a `//#region` as CI's bundle check (back with the tokenizer PR) reads one, a
+  // comment that names the harness's directory in a sentence, and a string that names another
+  // package's testing subpath.
   const HONEST = {
     "main.js":
       '// ../../packages/core/src/clock.ts\nimport { createServer } from "node:http";\n' +
@@ -1021,7 +2196,7 @@ describe("harness-scan.mjs", () => {
       "a module of the test harness (packages/testing) is bundled",
     ],
     [
-      "a region of packages/testing, as bundle-check reads one",
+      "a region of packages/testing, as CI's bundle check reads one",
       "main.js",
       "//#region ../../packages/testing/src/totp.ts\nfunction totp() {}\n//#endregion\n",
       "a module of the test harness (packages/testing) is bundled",
@@ -1115,4 +2290,168 @@ describe("harness-scan.mjs", () => {
       `harness-scan: ${join(dir, "empty")} holds no file`,
     ]);
   }, 30_000);
+
+  // The database files' mode, in which app.Dockerfile's db-assets stage runs the scan: beside the
+  // markers, every file must be one of the database's files as packages/db/src/assets.ts finds them
+  // (a .sql file in packages/<package>/bootstrap or migrations, a .json file in
+  // packages/<package>/grants or packages/db/roles/grants), no path may contain packages/testing,
+  // and every directory must be one those files lie in or under. packages/db's assets.test.ts holds
+  // this rule equal to assets.ts's over a planted tree.
+  describe("in its database files' mode", () => {
+    const DB = {
+      "packages/db/bootstrap/010_roles.sql": "select 1;\n",
+      "packages/db/migrations/20261121101000_audit_core.sql": "select 1;\n",
+      "packages/db/roles/grants/ops.json": '{"area":"ops","grants":[]}\n',
+    };
+    const scanDb = (dir: string) => runHarnessScan(REPOSITORY, dir, [DB_ASSETS_SCAN]);
+    const NONE = "which is none of the database's files (.sql and .json files only)";
+    const OUTSIDE =
+      "a file outside the database's folders (packages/<package>/bootstrap, migrations or grants, and packages/db/roles/grants)";
+    const HARNESS =
+      "a path of the test harness (packages/testing), which only the test target may hold";
+
+    it("passes the database's files, in each of their folders and extensions", () => {
+      const dir = output({
+        ...DB,
+        "packages/zz/bootstrap/015_zz.sql": "select 1;\n",
+        "packages/zz/migrations/20990101000000_zz_x.SQL": "select 1;\n",
+        "packages/a-b2/migrations/20990101000100_ab_x.sql": "select 1;\n",
+        "packages/zz/grants/zz.json": "{}\n",
+        "packages/db/grants/db.json": "{}\n",
+      });
+      const scan = scanDb(dir);
+      expect([scan.status, scan.stderr]).toEqual([0, ""]);
+      expect(scan.stdout).toContain("8 file(s), the database's files only, no harness marker");
+    }, 30_000);
+
+    it.each<[string, string, string, string?]>([
+      ["a .ts file", "packages/db/migrations/20990101000000_x.ts", `a .ts file, ${NONE}`],
+      ["a .js file", "packages/db/migrations/run.js", `a .js file, ${NONE}`],
+      ["a .mjs file", "packages/db/grants/x.mjs", `a .mjs file, ${NONE}`],
+      ["a map", "packages/db/migrations/x.sql.map", `a .map file, ${NONE}`],
+      [
+        "a file with no extension",
+        "packages/db/migrations/README",
+        `a file with no extension, ${NONE}`,
+      ],
+      [
+        "a .sql file in a folder assets.ts does not read",
+        "packages/db/seeds/20990101000000_seed.sql",
+        OUTSIDE,
+      ],
+      ["a .sql file outside packages", "zz/unknown/20990101000000_x.sql", OUTSIDE],
+      ["a .json file at the root", "grants.json", OUTSIDE],
+      ["a .sql file in a package's own directory", "packages/db/x.sql", OUTSIDE],
+      [
+        "a .sql file in a folder under migrations",
+        "packages/db/migrations/old/20990101000000_x.sql",
+        OUTSIDE,
+      ],
+      [
+        "a package's roles/grants, which only packages/db has",
+        "packages/zz/roles/grants/zz.json",
+        OUTSIDE,
+      ],
+      [
+        "a package whose name assets.ts does not read",
+        "packages/Zz9/migrations/20990101000000_x.sql",
+        OUTSIDE,
+      ],
+      [
+        "a package whose name begins with a digit",
+        "packages/9zz/migrations/20990101000000_x.sql",
+        OUTSIDE,
+      ],
+      [
+        "a .json file among the migrations",
+        "packages/db/migrations/x.json",
+        "a .json file in packages/db/migrations, which holds .sql files only",
+      ],
+      [
+        "a .sql file among the grants",
+        "packages/db/roles/grants/x.sql",
+        "a .sql file in packages/db/roles/grants, which holds .json files only",
+      ],
+      [
+        "a migration of packages/testing",
+        "packages/testing/migrations/20990101000000_testing_seed.sql",
+        HARNESS,
+      ],
+      ["a grant of packages/testing", "packages/testing/grants/testing.json", HARNESS],
+      [
+        "a package whose name begins with testing",
+        "packages/testing-kit/migrations/20990101000000_x.sql",
+        HARNESS,
+      ],
+      ["a path through the harness's package link", "node_modules/@fin/testing/x.sql", HARNESS],
+      [
+        "a database file that carries a seam's marker",
+        "packages/db/migrations/20990101000000_x.sql",
+        "a test seam's marker (fin:test-seam)",
+        "-- fin:test-seam\nselect 1;\n",
+      ],
+    ])(
+      "refuses %s",
+      (_name, file, what, text = "select 1;\n") => {
+        const dir = output({ ...DB, [file]: text });
+        const scan = scanDb(dir);
+        expect(scan.status).toBe(1);
+        expect(scan.stderr.split("\n")).toContain(`harness-scan: ${dir}/${file}: ${what}`);
+        expect(scan.stderr).toContain(
+          "what the image copies as the database's files holds more than them, or the test harness",
+        );
+      },
+      30_000,
+    );
+
+    it("refuses a directory outside the database's folders, empty or not", () => {
+      const dir = output(DB);
+      mkdirSync(join(dir, "harness"));
+      mkdirSync(join(dir, "packages/testing"));
+      const scan = scanDb(dir);
+      expect(scan.status).toBe(1);
+      const lines = scan.stderr.split("\n");
+      expect(lines).toContain(
+        `harness-scan: ${dir}/harness: a directory outside the database's folders`,
+      );
+      expect(lines).toContain(`harness-scan: ${dir}/packages/testing: ${HARNESS}`);
+    }, 30_000);
+
+    it("refuses the harness's raw sources, which the bundle's mode passes", () => {
+      const dir = output(DB);
+      cpSync(join(REPOSITORY, "packages/testing/src"), join(dir, "packages/testing/src"), {
+        recursive: true,
+      });
+      expect(runHarnessScan(REPOSITORY, dir).status).toBe(0);
+      const scan = scanDb(dir);
+      expect(scan.status).toBe(1);
+      expect(scan.stderr.split("\n")).toContain(
+        `harness-scan: ${dir}/packages/testing/src/totp.ts: ${HARNESS}`,
+      );
+    }, 30_000);
+
+    it("refuses a link, an empty output and a usage it does not read", () => {
+      const dir = output(DB);
+      symlinkSync(
+        join(REPOSITORY, "packages/db/migrations/20261121101000_audit_core.sql"),
+        join(dir, "packages/db/migrations/20990101000000_link.sql"),
+      );
+      const linked = scanDb(dir);
+      expect(linked.status).toBe(1);
+      expect(linked.stderr).toContain(
+        `harness-scan: ${dir}/packages/db/migrations/20990101000000_link.sql: a link, which the image would copy as a link`,
+      );
+      const empty = join(temporary(), "empty");
+      mkdirSync(empty);
+      expect(scanDb(empty)).toMatchObject({ status: 2 });
+      const usage = `usage: node ${SCAN_SCRIPT} [${DB_ASSETS_SCAN}] <output directory>`;
+      for (const scan of [
+        runHarnessScan(REPOSITORY, DB_ASSETS_SCAN),
+        runHarnessScan(REPOSITORY, dir, [DB_ASSETS_SCAN, "--bundle"]),
+        runHarnessScan(REPOSITORY, dir, ["--bundle"]),
+      ]) {
+        expect([scan.status, scan.stderr.trim()]).toEqual([2, usage]);
+      }
+    }, 30_000);
+  });
 });

@@ -19,15 +19,94 @@ import { defineConfig, type TestProjectInlineConfiguration } from "vitest/config
 
 const root = import.meta.dirname;
 
-/** The `packages:` globs of pnpm-workspace.yaml, read so the two lists cannot drift apart. */
-function workspaceGlobs(): string[] {
-  const lines = readFileSync(join(root, "pnpm-workspace.yaml"), "utf8").split("\n");
-  const start = lines.indexOf("packages:");
+function fail(message: string): never {
+  throw new Error(message);
+}
+
+/**
+ * `line` without its trailing comment (a `#` at its start or after a space or a tab, outside
+ * quotes) and its trailing white space. White space is YAML's, a space or a tab alone: a no-break
+ * space or another character JavaScript reads as white space is part of a scalar to YAML, so it
+ * is kept, and the item holding it refused (see globOf).
+ */
+function uncommented(line: string): string {
+  let quote: string | undefined;
+  for (let at = 0; at < line.length; at++) {
+    const char = line.charAt(at);
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+    } else if (char === "'" || char === '"') {
+      quote = char;
+    } else if (char === "#" && (at === 0 || /[ \t]/.test(line.charAt(at - 1)))) {
+      return line.slice(0, at).replace(/[ \t]+$/, "");
+    }
+  }
+  return line.replace(/[ \t]+$/, "");
+}
+
+/**
+ * The glob a list item's scalar `text` holds: single-quoted, double-quoted with no escape, or plain
+ * (starting with a letter, and not a word YAML reads as a boolean or null); and in every form only
+ * letters, digits, `_`, `.`, `-`, `/` and `*`, so no negation, class, brace or extglob that pnpm's
+ * matcher could read otherwise. Undefined for anything else.
+ */
+function globOf(text: string): string | undefined {
+  const glob = /^'(?:[^']|'')*'$/.test(text)
+    ? text.slice(1, -1).replaceAll("''", "'")
+    : /^"[^"\\]*"$/.test(text)
+      ? text.slice(1, -1)
+      : /^[A-Za-z]/.test(text) && !/^(?:true|false|null)$/i.test(text)
+        ? text
+        : undefined;
+  return glob !== undefined && /^[\w.*/-]+$/.test(glob) ? glob : undefined;
+}
+
+// A top-level key of pnpm-workspace.yaml as the reader reads one: a plain name, or a quoted one
+// with no escape, then any spaces, the colon and the value on its line, if any.
+const TOP_LEVEL_KEY = /^(?:([A-Za-z_][\w.-]*)|'([^']*)'|"([^"\\]*)") *:(?: +(.*))?$/;
+
+/**
+ * The globs of pnpm-workspace.yaml's `packages:` list in the file's text `text`, read so the two
+ * lists cannot drift apart, as YAML, and so pnpm, reads them in the subset
+ * scripts/check-supply-chain.mjs accepts: the lines are split where YAML splits them (LF, CR or
+ * CRLF), a blank or comment-only line anywhere is skipped, a trailing `# comment` is dropped (blank
+ * and white space being YAML's, spaces and tabs alone, see uncommented), and the list runs from
+ * the `packages:` key to the next top-level key, each item `- <glob>` at the first item's
+ * indentation (see globOf). Any other line in the list, a value on the key's own line, a second
+ * `packages:`, an indented line before the first top-level key and a top-level line that is not a
+ * key the reader reads (any of which YAML could read as the list or its key) is refused, never
+ * skipped, so no package pnpm installs is left out. This is a copy of
+ * packages/server/test/image-build.ts's workspaceGlobs, which the release image's tests
+ * (packages/server/src/build/release-image.test.ts) hold to the same globs and refusals.
+ */
+export function workspaceGlobs(text: string): string[] {
   const globs: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    const item = /^ {2}- (\S+)$/.exec(line);
-    if (item?.[1] === undefined) break;
-    globs.push(item[1]);
+  let key: string | undefined;
+  let seen = false;
+  let indent: string | undefined;
+  for (const [index, line] of text.split(/\r\n|\r|\n/).entries()) {
+    const content = uncommented(line);
+    if (content === "") continue;
+    const at = `pnpm-workspace.yaml: line ${index + 1}`;
+    if (!line.startsWith(" ")) {
+      const top = TOP_LEVEL_KEY.exec(content);
+      key = top?.[1] ?? top?.[2] ?? top?.[3];
+      if (top === null || key === undefined) fail(`${at} is not a top-level key the reader reads`);
+      if (key !== "packages") continue;
+      if (seen) fail(`${at} holds the packages key a second time`);
+      seen = true;
+      if (top[4] !== undefined) fail(`${at} gives packages a value on its line, not a block list`);
+      continue;
+    }
+    if (key === undefined) fail(`${at} is indented under no top-level key`);
+    if (key !== "packages") continue;
+    const item = /^( +)- +(.*)$/.exec(content);
+    const glob = item?.[2] === undefined ? undefined : globOf(item[2]);
+    indent ??= item?.[1];
+    if (item?.[1] !== indent || glob === undefined) {
+      fail(`${at}, in the packages list, is not an item \`- <glob>\` the reader reads`);
+    }
+    globs.push(glob);
   }
   return globs;
 }
@@ -59,7 +138,7 @@ export default defineConfig(({ mode }) => {
       "vitest --mode db runs the integration tests: set FIN_TEST_DATABASE_URL to a Postgres 18 database",
     );
   }
-  const packages = workspaceGlobs()
+  const packages = workspaceGlobs(readFileSync(join(root, "pnpm-workspace.yaml"), "utf8"))
     .flatMap((glob) => globSync(glob, { cwd: root }))
     .filter((dir) => existsSync(join(root, dir, "package.json")))
     .map((dir) => dir.split(sep).join("/"))

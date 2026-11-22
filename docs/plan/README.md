@@ -79,7 +79,7 @@ repository `aktharazif/fin-next` (R12). This plan is committed before any code (
 **What is promised, and what is not.**
 
 - Staging-complete is targeted for Thursday 26 Nov at 22:00.
-- Production is not promised for any date. It waits for 14 production gates (PG-01 to PG-14): soaks,
+- Production is not promised for any date. It waits for 17 production gates (PG-01 to PG-17): soaks,
   drills, a cold review of the whole codebase, the email warm-up and vendor answers. The estimate is
   that production opens to real developers in the week of 7 Dec 2026 at the earliest, and live money
   opens later. Both dates are UNVERIFIED.
@@ -274,7 +274,7 @@ the item that completes it.
 
 | Req | The owner's requirement | Where it is covered (file and section) | Key decisions | At staging-complete |
 |---|---|---|---|---|
-| R1 | Production-ready, from scratch, in a new repository | ARCHITECTURE §1, §11.10, §14, §15; EXECUTION §7 (definition and PG-01 to PG-14); spec 01 §2, §3; spec 08 §10 | [G-01], [G-02], [G-04], [G-05] | Partial: production readiness is EXECUTION §7's gates |
+| R1 | Production-ready, from scratch, in a new repository | ARCHITECTURE §1, §11.10, §14, §15; EXECUTION §7 (definition and PG-01 to PG-17); spec 01 §2, §3; spec 08 §10 | [G-01], [G-02], [G-04], [G-05] | Partial: production readiness is EXECUTION §7's gates |
 | R2 | Everything on Railway, including the database | ARCHITECTURE §4; spec 01 §6; spec 08 §0.2 | [P-01], [P-02], [P-09], [OB-18] | Full for compute and the database. Off Railway by decision: the static files, the vault, the watcher, the tunnels' edge, Access and email |
 | R3 | Cloudflare Email Sending | ARCHITECTURE §9; spec 01 §7.8; spec 08 §4; spec 02 §17, spec 03 §17 | [EM-01] to [EM-08] | Full on staging; production needs [EM-02] and the warm-up ([EM-08]) |
 | R4 | Cloudflare in front of Railway | ARCHITECTURE §5; spec 01 §7; spec 08 §8.2; section 3 of this page | [FD-01], [FD-13] to [FD-19] | Full; the evict drill is in hardening (PG-05) |
@@ -449,7 +449,7 @@ EXECUTION §10.
 | [README.md](README.md) (this page) | The front page: summary, stack, hosts, the 21 Nov decisions, traceability, timeline and the owner's first inputs | R1 to R16 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The system: principles, the diagram and data flows, runtime and stack, Railway, the Cloudflare front door, data, security, audit, email, observability, CI/CD and review, provider adapters, the public API and docs, what is carried or dropped, and operating it | R1 to R16 (its "Requirement map") |
 | [DECISIONS.md](DECISIONS.md) | The only register: 301 decisions with default, alternatives, rationale, status and deadline, 27 of them in the Build decisions (BD) group, made under the owner's away-time authority; the decisions taken while the owner was away, for the owner's review; the owner's decisions by deadline; the 19 Nov decisions mapped; the critics' findings (appendix A); the changes for the overnight decisions (appendix B) | R1 to R16 (its "Requirements and where they are decided") |
-| [EXECUTION.md](EXECUTION.md) | How it is built: the days, how the work runs, Phase 0, Saturday, Sunday and Monday with lanes, order, review gates, screens, acceptance criteria and cut lines; hardening; the production gates PG-01 to PG-14; risks; the old product until fin-next takes over; decisions by when; estimates | R1 to R16 (§0.2) |
+| [EXECUTION.md](EXECUTION.md) | How it is built: the days, how the work runs, Phase 0, Saturday, Sunday and Monday with lanes, order, review gates, screens, acceptance criteria and cut lines; hardening; the production gates PG-01 to PG-17; risks; the old product until fin-next takes over; decisions by when; estimates | R1 to R16 (§0.2) |
 | [spikes.md](spikes.md) | The spike log: one row per spike run, with when it ran on the build clock, its result, what it showed and its follow-ups. S-01 (SP-25) is its first row; the build adds rows through pull requests | R4 (the front-door spikes), and each later row's own |
 | [specs/01-phase0-platform.md](specs/01-phase0-platform.md) | Phase 0: the public repository and its rules, the monorepo scaffold, the fast CI skeleton, Railway staging, Cloudflare (tunnels, static deployments, routes, Access, email, the vault, the watcher), Better Stack, secrets, the platform's own audit, spikes SP-25 and SP-26 | R1 to R16 (§0.2) |
 | [specs/02-auth-and-roles.md](specs/02-auth-and-roles.md) | Saturday: Better Auth configuration, the endpoint allowlist, sign-in methods, assurance and the mandatory second factor, step-up, both permission catalogues and roles, organisations and teams, staff management, sessions, API keys, data model, routes, screens, audit events, security emails, monitoring and tests | R1 to R6, R9 to R16 (§0.2) |
@@ -555,7 +555,7 @@ DECISIONS.md before work that depends on it merges.
 | `(D6)` | Marks work that the owner's trim of Phase 0 on 21 Nov moved to hardening, before production (section 1), as in "moves to hardening (D6)". It is not the 19 Nov decision D6 | Throughout |
 | `(D9)` | Marks what follows from fin-review running locally, as the merge gate, until CI has an Anthropic credential (the owner, 21 Nov, about 08:49). It is not the 19 Nov decision D9 | ARCHITECTURE, DECISIONS |
 | `EQ-nn` | An owner question of EXECUTION's first draft, with the decision that now answers it | EXECUTION §10 |
-| `PG-nn` | A production gate, PG-01 to PG-14. `G-` belongs to governance alone | EXECUTION §7.3 |
+| `PG-nn` | A production gate, PG-01 to PG-17. `G-` belongs to governance alone | EXECUTION §7.3 |
 | `SP-nn`, `S-nn` | A spike; EXECUTION's four front-door spikes (S-01 is SP-25) | ARCHITECTURE §11.11; EXECUTION §2.6; spec 01 §11 (SP-25, SP-26); spec 03 §22 (SP-27); results in [spikes.md](spikes.md) |
 | `NF-n` | A new finding from a spike run (S-01 recorded NF-1 and NF-2) | [spikes.md](spikes.md) |
 | `FW-Cnn`, `FW-Snn`, `FW-Xnn` | The framework verdict's conditions, spikes and reversal triggers | ARCHITECTURE §3.4 |

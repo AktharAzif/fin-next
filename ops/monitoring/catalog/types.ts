@@ -1,5 +1,6 @@
 // The catalogue entry (spec 08 §7.2). One fragment per area, `ops/monitoring/catalog/<area>.ts`,
-// owned by the area's lane; each exports `entries`. monitoring:check reads every fragment.
+// owned by the area's lane; each exports `entries`. monitoring:check reads every fragment, and
+// catalog/owed.ts, the alerts owed until their fragments land.
 
 export type CatalogKind = "unit" | "failure" | "security" | "money" | "info";
 export type CatalogLevel = "info" | "warn" | "error";
@@ -17,7 +18,15 @@ export interface CatalogEntry {
   readonly reasons?: readonly string[];
   /** Alert names in ops/monitoring/<env>/alerts/*.json that watch this event. */
   readonly alerts: readonly string[];
-  /** Required when `alerts` is empty and a kind is failure, security or money. */
+  /**
+   * Alerts the plan names for this event whose fragment has not landed: each is listed in
+   * catalog/owed.ts with the lane that owes it and the date it is due (MC-15).
+   */
+  readonly owed?: readonly string[];
+  /**
+   * Required when `alerts` and `owed` are empty and a kind is failure, security or money; beside
+   * owed alerts, what covers the event until they land.
+   */
   readonly noAlert?: string;
   /**
    * The fields every alert on this event groups by, in order: one incident per combination, for an

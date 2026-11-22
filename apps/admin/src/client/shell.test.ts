@@ -45,7 +45,7 @@ describe("index.html", () => {
   });
 
   it("loads theme.js first, render-blocking, then the module entry", () => {
-    const scripts = [...indexHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+    const scripts = [...indexHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
     expect(scripts.map((s) => s[1]?.trim())).toEqual([
       'src="/theme.js"',
       'type="module" src="/src/client/main.tsx"',

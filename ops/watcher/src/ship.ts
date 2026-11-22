@@ -92,6 +92,16 @@ export async function ship(
   return false;
 }
 
+/**
+ * The URL without its trailing slashes. One backward pass over the slashes it drops, never a
+ * pattern: an unanchored `/\/+$/` retries at every slash of an inner run, quadratic in its length.
+ */
+export function withoutTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return url.slice(0, end);
+}
+
 /** Pings the heartbeat, or its failure URL. Returns whether the ping was accepted. */
 export async function ping(
   url: string | undefined,
@@ -100,7 +110,7 @@ export async function ping(
 ): Promise<boolean> {
   if (url === undefined || !url.startsWith("https://")) return false;
   try {
-    const target = failed ? `${url.replace(/\/+$/, "")}/fail` : url;
+    const target = failed ? `${withoutTrailingSlashes(url)}/fail` : url;
     const response = await fetchImpl(target, {
       method: "POST",
       signal: AbortSignal.timeout(SHIP_TIMEOUT_MS),

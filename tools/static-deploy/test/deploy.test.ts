@@ -517,6 +517,19 @@ describe("the CI entry point", () => {
       KEYS.map((k) => `fin-next-staging-${k}-static`),
     );
     assert.match(printed.out, /"event":"deploy.static_done"/);
+    // The job log's lines name the release they upload `deployedRelease`, as pnpm fin's do:
+    // `release` is the telemetry envelope's own field, and a line field of that name is dropped.
+    const lines = printed.out
+      .split("\n")
+      .filter((l) => l.startsWith("{"))
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.deepEqual(
+      lines.map((l) => [l.event, l.deployedRelease, "release" in l]),
+      [
+        ...KEYS.map(() => ["deploy.static_step", RELEASE, false]),
+        ["deploy.static_done", RELEASE, false],
+      ],
+    );
     const shown = printed.out
       .split("\n")
       .filter((l) => !l.startsWith("::add-mask::"))

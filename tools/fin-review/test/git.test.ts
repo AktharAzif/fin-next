@@ -8,12 +8,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { after, before, describe, it } from "node:test";
+import { after, afterEach, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ProgramError } from "../src/errors.ts";
 import { resolveProgram, runProgram } from "../src/exec.ts";
@@ -33,6 +34,32 @@ const A = "a".repeat(40);
 const B = "b".repeat(40);
 const Z = "0".repeat(40);
 const POSIX = process.platform !== "win32";
+
+/**
+ * The first statement of every script these tests start, which may otherwise wait for a minute or
+ * for ever: once this test process is gone (a runner killed outright runs no clean-up), the script
+ * ends itself, checked every 250 ms by a timer that never holds it open. It watches this process
+ * rather than its own parent, since a grandchild here must outlive the program that started it.
+ */
+function endsWithThisProcess(): string {
+  return `setInterval(() => { try { process.kill(${process.pid}, 0); } catch { process.kill(process.pid, "SIGKILL"); } }, 250).unref();`;
+}
+
+/** Whether `pid` is a process still running (a zombie on Linux is not). */
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  if (process.platform !== "linux") return true;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.charAt(stat.lastIndexOf(")") + 2) !== "Z";
+  } catch {
+    return false;
+  }
+}
 
 describe("parseRawDiffZ", () => {
   it("reads every status with both modes, renames and copies at both paths", () => {
@@ -378,7 +405,10 @@ describe("runProgram", () => {
 
   it("kills a program that runs past its timeout", async () => {
     await assert.rejects(
-      runProgram(node, ["-e", "setTimeout(() => {}, 60000)"], { ...base, timeoutMs: 200 }),
+      runProgram(node, ["-e", `${endsWithThisProcess()} setTimeout(() => {}, 60000)`], {
+        ...base,
+        timeoutMs: 200,
+      }),
       (error: unknown) => error instanceof ProgramError && /timed out/.test(error.message),
     );
   });
@@ -409,17 +439,68 @@ describe("runProgram", () => {
 
   describe("a grandchild that holds the output pipes", () => {
     let tmp: ReturnType<typeof tempDir>;
+    /** Where every script these tests start records its pid, as an empty file named by it. */
+    let pids = "";
     before(() => {
       tmp = tempDir("grandchild");
+      pids = join(tmp.dir, "pids");
+      mkdirSync(pids);
     });
-    after(() => tmp.cleanup());
+
+    /**
+     * Ends every recorded process with its process group (SIGTERM, then SIGKILL after a short
+     * grace), whatever state its test ended in, then fails naming each pid that still runs.
+     */
+    async function endRecorded(): Promise<void> {
+      const recorded = readdirSync(pids)
+        .filter((name) => /^\d+$/.test(name))
+        .map(Number);
+      for (const name of readdirSync(pids)) rmSync(join(pids, name), { force: true });
+      const send = (pid: number, signal: NodeJS.Signals): void => {
+        for (const target of POSIX ? [-pid, pid] : [pid]) {
+          try {
+            process.kill(target, signal);
+          } catch {
+            // Nothing left to signal.
+          }
+        }
+      };
+      const settle = async (ms: number): Promise<void> => {
+        const end = performance.now() + ms;
+        while (recorded.some(isRunning) && performance.now() < end)
+          await new Promise((resolve) => setTimeout(resolve, 25));
+      };
+      for (const pid of recorded) send(pid, "SIGTERM");
+      await settle(1000);
+      for (const pid of recorded) send(pid, "SIGKILL");
+      await settle(2000);
+      const outlived = recorded.filter(isRunning);
+      assert.deepEqual(outlived, [], `a process outlived its test: pid ${outlived.join(", ")}`);
+    }
+
+    afterEach(endRecorded);
+    after(async () => {
+      try {
+        await endRecorded();
+      } finally {
+        tmp.cleanup();
+      }
+    });
+
+    /** A statement that records the pid the expression `pid` names in the pids directory. */
+    function record(pid: string): string {
+      return `require("node:fs").writeFileSync(require("node:path").join(${JSON.stringify(pids)}, String(${pid})), "");`;
+    }
 
     /** A node script that starts a grandchild sharing its stdio, records the grandchild's pid, then `then`. */
     function parentScript(pidFile: string, grandchild: string, then: string): string[] {
       const script = `
+        ${endsWithThisProcess()}
+        ${record("process.pid")}
         const { spawn } = require("node:child_process");
         const { writeFileSync } = require("node:fs");
-        const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "inherit" });
+        const child = spawn(process.execPath, ["-e", ${JSON.stringify(`${endsWithThisProcess()} ${record("process.pid")} ${grandchild}`)}], { stdio: "inherit" });
+        ${record("child.pid")}
         writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
         ${then}
       `;
@@ -502,10 +583,16 @@ describe("runProgram", () => {
       const exec = fileURLToPath(new URL("../src/exec.ts", import.meta.url));
       const engine = `
         import { runProgram } from ${JSON.stringify(exec)};
-        const script = ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)};
+        ${endsWithThisProcess()}
+        const script = ${JSON.stringify(`${endsWithThisProcess()} ${record("process.pid")} require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)};
         await runProgram(process.execPath, ["-e", script], { cwd: process.cwd(), env: { PATH: process.env.PATH ?? "" }, timeoutMs: 60000, maxOutputBytes: 1024 });
       `;
-      const child = spawn(node, ["--input-type=module", "-e", engine], { stdio: "ignore" });
+      // The engine leads its own process group; its programs lead their own (exec.ts).
+      const child = spawn(node, ["--input-type=module", "-e", engine], {
+        stdio: "ignore",
+        detached: true,
+      });
+      writeFileSync(join(pids, String(child.pid)), "");
       for (let i = 0; i < 200 && !existsSync(pidFile); i++)
         await new Promise((resolve) => setTimeout(resolve, 25));
       assert.ok(existsSync(pidFile), "the program started");

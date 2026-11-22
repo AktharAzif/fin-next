@@ -1,0 +1,26 @@
+{
+  "$comment": "The staff area's alerts (spec 02 §18.2; spec 08 §7.8 group C), from the steward's ruling of 22 Nov: access-keys-unavailable. L-SAT-09 adds the rest of the area's alerts (owed in catalog/owed.ts). Only admin's API half checks the Access token, so only admin writes access.keys_unavailable.",
+  "alerts": [
+    {
+      "name": "access-keys-unavailable",
+      "group": "C",
+      "severity": "P",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["access.keys_unavailable"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Fin Admin's API half could not read Cloudflare Access's signing keys and refused requests with 503: staff cannot use Fin Admin. Refusals: {{value}}.",
+      "metadata": {
+        "check": "Cloudflare's status for Access; the admin service's FIN_ACCESS_TEAM setting against the Zero Trust team name; the release.",
+        "flow": "F6",
+        "runbook": "docs/runbooks/access-keys-unavailable.md"
+      }
+    }
+  ]
+}

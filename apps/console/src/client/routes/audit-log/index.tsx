@@ -37,6 +37,7 @@ import {
   objectChip,
   PAGE_SIZE,
   RANGE_LABELS,
+  rangeEmptyTitle,
   readAuditSearch,
 } from "../../audit/filters.ts";
 import {
@@ -186,7 +187,7 @@ function AuditLogPage() {
     ) : kind === "range" ? (
       <EmptyState
         variant="no-results"
-        title={`No events in the ${RANGE_LABELS[range].toLowerCase().replace(/^last /, "last ")}`}
+        title={rangeEmptyTitle(range)}
         description="Older events are still kept."
         action={
           <Button variant="secondary" size="sm" onClick={() => go({ ...without(), range: "all" })}>

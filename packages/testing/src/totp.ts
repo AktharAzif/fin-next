@@ -25,7 +25,14 @@ export function base32Encode(bytes: Uint8Array): string {
 
 /** Decodes base32, ignoring case, spaces, hyphens and `=` padding (as authenticator apps do). */
 export function base32Decode(text: string): Uint8Array {
-  const clean = text.replace(/[\s-]/g, "").replace(/=+$/, "").toUpperCase();
+  // One pass, no pattern: trim() empties exactly the characters `\s` matches (white space and
+  // line terminators). Then one backward pass cuts the padding, from the end only. (This module
+  // imports nothing of the harness: the server build guard's tests bundle it on its own.)
+  let compact = "";
+  for (const char of text) if (char !== "-" && char.trim() !== "") compact += char;
+  let end = compact.length;
+  while (end > 0 && compact.charCodeAt(end - 1) === 0x3d) end -= 1;
+  const clean = compact.slice(0, end).toUpperCase();
   const out: number[] = [];
   let bits = 0;
   let value = 0;

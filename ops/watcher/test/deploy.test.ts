@@ -46,6 +46,12 @@ interface Call {
   auth: string | null;
 }
 
+/** Whether a call went to Better Stack: its domain, or a host under it (label by label). */
+function isBetterStack(url: string): boolean {
+  const host = new URL(url).hostname;
+  return host === "betterstack.com" || host.endsWith(".betterstack.com");
+}
+
 const NOW = new Date(Date.UTC(2026, 10, 21, 12));
 const TOKEN_ID = ["token", "id", "seven"].join("-");
 const inDays = (days: number) => new Date(NOW.getTime() + days * 86_400_000).toISOString();
@@ -273,9 +279,7 @@ describe("watcher deploy", () => {
       const { ctx, output } = await context(apis.fetch);
       await expect(watcherDeploy(ctx), String(message)).rejects.toThrow(message);
       expect(cloudflareCalls(apis.calls).filter((c) => c.method !== "GET")).toEqual([]);
-      expect(apis.calls.some((c) => new URL(c.url).hostname.endsWith("betterstack.com"))).toBe(
-        false,
-      );
+      expect(apis.calls.some((c) => isBetterStack(c.url))).toBe(false);
       expectNothingPrivate(output);
     }
   });

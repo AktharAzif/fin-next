@@ -83,6 +83,32 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     "\u{fe31}|",
   ]),
   /**
+   * Modifier letters compatibility folding turns into a letter, which the file draws as
+   * punctuation, and the punctuation each is drawn as: read as that punctuation, which is passed
+   * over, and still as the letter each folds to, so no name refused before is allowed now.
+   *
+   * Which modifier letters are drawn as punctuation is decided by Unicode's data alone, never by
+   * eye. A modifier letter is one of general category Lm (UnicodeData.txt). One that folding
+   * leaves without a letter (no decomposition, or one to modifier letters, marks and spaces only)
+   * is left out of a reading, as punctuation is: the marks named MODIFIER LETTER PRIME,
+   * APOSTROPHE, REVERSED GLOTTAL STOP, CIRCUMFLEX ACCENT, TRIANGULAR COLON and the like. One that
+   * folding turns into a letter (a <super> or <sub> decomposition, in every case) is drawn as that
+   * letter, raised or lowered, as its name says (MODIFIER LETTER SMALL H is h, MODIFIER LETTER
+   * CAPITAL A is A), and reads as the rows read the letter, unless this file draws it as
+   * punctuation: its prototype holds no letter and no digit but modifier letters of the Common
+   * script, which every script shares (src/engine/look-alikes.test.ts's `drawnAsPunctuation`).
+   * Those are the rows here; that test fails when a modifier letter the file draws as punctuation
+   * could not be passed over.
+   */
+  punctuationModifiers: Object.freeze([
+    // Latin: MODIFIER LETTER SMALL REVERSED GLOTTAL STOP, drawn as U+02C1 MODIFIER LETTER REVERSED
+    // GLOTTAL STOP; MODIFIER LETTER SMALL O, drawn as the degree sign; MODIFIER LETTER SMALL TURNED
+    // V, drawn as the circumflex accent
+    "\u{2e4}\u{2c1} \u{1d52}\u{b0} \u{1dba}^",
+    // Cyrillic: MODIFIER LETTER CYRILLIC SMALL O, drawn as the degree sign
+    "\u{1e03c}\u{b0}",
+  ]),
+  /**
    * Capitals drawn as a Latin letter their small letters are not, by their entries or their names:
    * read before lower-casing.
    */

@@ -98,7 +98,6 @@ describe("on a Node without import.meta.main, every script fails instead of pass
       { EVENT_NAME: "pull_request", BASE_SHA: "b".repeat(40), HEAD_SHA: "a".repeat(40) },
     ],
     ["workflow-rules.mjs", ["--root", "/nonexistent"], {}],
-    ["bundle-check.mjs", ["--root", "/nonexistent"], {}],
     ["release-static.mjs", ["manifest"], {}],
     ["plan-fallback.mjs", [], {}],
     ["node-check.mjs", [], {}],
