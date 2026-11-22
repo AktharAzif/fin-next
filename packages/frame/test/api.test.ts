@@ -63,6 +63,31 @@ function problem(status: number, code: string, extra: Record<string, unknown> = 
   });
 }
 
+/**
+ * The work `run` does, counted without a clock: each character it reads with charCodeAt, and each
+ * regular expression it runs. No pattern may run at all here, so a pattern that could backtrack
+ * polynomially fails the test at once instead of hanging it.
+ */
+function countWork<T>(run: () => T): { result: T; reads: number } {
+  const { charCodeAt } = String.prototype;
+  const { exec } = RegExp.prototype;
+  let reads = 0;
+  String.prototype.charCodeAt = function (this: string, index: number): number {
+    reads += 1;
+    return charCodeAt.call(this, index);
+  };
+  RegExp.prototype.exec = (input: string): RegExpExecArray | null => {
+    throw new Error(`a regular expression ran on ${String(input).length} characters`);
+  };
+  try {
+    const result = run();
+    return { result, reads };
+  } finally {
+    String.prototype.charCodeAt = charCodeAt;
+    RegExp.prototype.exec = exec;
+  }
+}
+
 function client(
   answers: Response[],
   hooks: ApiHooks = {},
@@ -132,6 +157,25 @@ describe("buildRequest", () => {
       expect(error, memberId).toBeInstanceOf(TypeError);
       expect(String(error), memberId).toContain(":memberId");
       if (memberId.includes("%")) expect(String(error), memberId).not.toContain(memberId);
+    }
+    // Encoded more than once, its hex digits escaped too: a server or proxy that decodes again,
+    // one level each time, would reach the dot segment.
+    for (const memberId of [
+      "%252e",
+      "%252E%252e",
+      "%25252e%2e",
+      ".%252e",
+      "%25%32%65",
+      "%25%32E%2e",
+      "%2525%2532%2565",
+    ]) {
+      expect(() => buildRequest(removeMember, { memberId }), memberId).toThrow(/:memberId/);
+    }
+    // A value that never decodes to a dot segment, however often it is decoded, is one segment.
+    for (const memberId of ["%25", "%2", "%252", "%2e%2e%2e", "a%2e", "%252e.x", "%2g", "%%2e"]) {
+      expect(buildRequest(removeMember, { memberId }).path, memberId).toBe(
+        `/team/members/${encodeURIComponent(memberId)}/remove`,
+      );
     }
     // Dots inside a value are an ordinary part of one segment.
     expect(buildRequest(removeMember, { memberId: "mem.1..2" }).path).toBe(
@@ -464,6 +508,23 @@ describe("api()", () => {
     await api(health, {});
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://api.example.com/api/health");
     expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({ credentials: "include" });
+  });
+
+  it("drops a base's trailing slashes in one backward pass, never with a pattern", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      json(200, { status: "ok" }),
+    );
+    const { api } = createApiClient({ app: "console", base: "/api///", fetch: fetchImpl });
+    await api(health, {});
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("/api/health");
+    // The shape a backtracking /\/+$/ is quadratic on: a long run of slashes, then one more
+    // character. Reading it costs one character; a trailing run costs one per slash and one more.
+    const inner = `/api${"/".repeat(100_000)}x`;
+    expect(countWork(() => createApiClient({ app: "console", base: inner })).reads).toBe(1);
+    const trailing = `/api${"/".repeat(100_000)}`;
+    expect(countWork(() => createApiClient({ app: "console", base: trailing })).reads).toBe(
+      100_001,
+    );
   });
 
   it("times out a request with the contract's timeout", async () => {

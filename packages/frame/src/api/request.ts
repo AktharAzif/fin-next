@@ -17,16 +17,28 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/** One percent escape: `%` and two hex digits. */
+const ESCAPE = /%([0-9a-f]{2})/gi;
+
+/** One level of percent-decoding: every escape at once, in one pass, as a decoder reads it. */
+function decodeOnce(value: string): string {
+  return value.replace(ESCAPE, (_escape, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
+
 /**
  * Whether a path parameter's value is, or decodes to, a "." or ".." segment. The URL parser reads
  * `%2e` as a dot, and a server or proxy may decode a segment again before resolving it; a dot
- * segment is resolved away, so the request would reach another route under /api. Each pass only
- * shortens the value, so the loop ends.
+ * segment is resolved away, so the request would reach another route under /api. Each pass decodes
+ * exactly one level, every escape together, so a `%` a pass makes is only read by the next pass,
+ * as the next decoder would read it, and escaped hex digits (`%25%32%65`) are caught too. Each pass
+ * that changes the value shortens it, so the loop ends.
  */
 function isDotSegment(value: string): boolean {
   let current = value;
   for (;;) {
-    const next = current.replace(/%25/gi, "%").replace(/%2e/gi, ".");
+    const next = decodeOnce(current);
     if (next === current) break;
     current = next;
   }

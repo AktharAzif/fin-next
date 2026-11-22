@@ -132,9 +132,19 @@ async function readJson(response: Response): Promise<{ ok: true; value: unknown 
   }
 }
 
+/**
+ * A base without its trailing slashes. One backward pass over the slashes it drops, never a
+ * pattern: an unanchored `/\/+$/` retries at every slash of an inner run, quadratic in its length.
+ */
+function withoutTrailingSlashes(base: string): string {
+  let end = base.length;
+  while (end > 0 && base.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return base.slice(0, end);
+}
+
 export function createApiClient(config: ApiConfig): ApiClient {
   let hooks: ApiHooks = {};
-  const base = (config.base ?? "/api").replace(/\/+$/, "");
+  const base = withoutTrailingSlashes(config.base ?? "/api");
   const fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
   const uuid = config.randomUUID ?? (() => crypto.randomUUID());
   const now = config.now ?? (() => Date.now());
