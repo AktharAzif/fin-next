@@ -4,9 +4,9 @@
 // apart from `request_id` (T05-08), the reason only in the request line, load shedding and the
 // negative filter before any statement (T05-10), a docs-origin live key refused before any lookup
 // (T05-42), the live gate (T05-12), both windows, "last used" after the answer and at most once a
-// minute per key (T05-16), a key ID with no row reaching the refused-key window's 429 after as many
-// refusals as one with a row, and the request line's preflight and docs facts. The real statements
-// on Postgres 18 are edge.db.test.ts's.
+// minute per key (T05-16), a key ID with no row answered the same 401s, then 429s with the same
+// Retry-After, as one with a row, on one replica or two sharing a store, and the request line's
+// preflight and docs facts. The real statements on Postgres 18 are edge.db.test.ts's.
 import { newKey } from "@fin/keys";
 import { bootApi, NEIGHBOUR_ADDRESS } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -263,13 +263,31 @@ describe("the key check", () => {
     expect(api.stdout.some((l) => l.event === "key.pepper_missing")).toBe(true);
   });
 
-  it("refuses a key found not to exist again without a statement (the negative filter)", async () => {
+  it("refuses a key found not to exist without a statement once its address's window is full (the negative filter)", async () => {
     const key = store.add("test", "rk");
     store.records.delete(key.slice(12, 22));
-    expect((await whoami(bearer(key))).status).toBe(401);
-    const before = store.statements;
-    for (let i = 0; i < 5; i++) expect((await whoami(bearer(key))).status).toBe(401);
+    const from = (k: string) => ({ ...bearer(k), "cf-connecting-ip": "8.8.6.6" });
+    // Until the window in Postgres is full, each refusal reaches the store, as any refused key's does.
+    let before = store.statements;
+    for (let i = 0; i < 30; i++) expect((await whoami(from(key))).status).toBe(401);
+    expect(store.statements - before).toBe(60);
+    expect((await whoami(from(key))).status).toBe(429);
+    // Then a flood of the same key ID leaves the statement counter flat (T05-10).
+    before = store.statements;
+    for (let i = 0; i < 20; i++) {
+      const res = await whoami(from(key));
+      expect(res.status).toBe(429);
+      expect(res.json()).toMatchObject({ violated_policies: ["refused_keys"] });
+      expect(Number(res.headers["retry-after"])).toBeGreaterThanOrEqual(1);
+      expect(Number(res.headers["retry-after"])).toBeLessThanOrEqual(17);
+    }
     expect(store.statements).toBe(before);
+    // Only a key ID found not to exist is answered so: a refused key with a row from the same
+    // address is still looked up and counted, and a working key never meets the window.
+    const revoked = store.add("test", "rk", { revoked_at: new Date() });
+    expect((await whoami(from(revoked))).status).toBe(429);
+    expect(store.statements - before).toBe(2);
+    expect((await whoami(from(store.add("test", "rk")))).status).toBe(200);
   });
 
   it("refuses a live key, a malformed one and another deployment's from the docs origin before any lookup", async () => {
@@ -362,8 +380,9 @@ describe("load shedding", () => {
         }
       }
       expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(6);
-      // Only the first lookup reached the store; the negative filter and the bucket took the rest.
-      expect(store.statements - before).toBeLessThanOrEqual(2);
+      // Only the requests the bucket let through reached the store (a lookup and a count each); it
+      // shed the rest before any statement.
+      expect(store.statements - before).toBe(2 * statuses.filter((s) => s === 401).length);
       const line = shedApi.stdout.filter((l) => l.event === "request").at(-1) as unknown as Record<
         string,
         unknown
@@ -375,35 +394,63 @@ describe("load shedding", () => {
   });
 });
 
-describe("on a clock the test moves", () => {
+describe("on a clock the test moves, two replicas sharing one store", () => {
   let now = Date.parse("2026-11-22T10:00:01.000Z");
-  const own = new FakeStore();
-  let edge: Awaited<ReturnType<typeof bootApi>>;
+  const clock = { now: () => now };
+  // The store's windows are fixed minutes of the same clock, as Postgres's are of its own.
+  const own = new FakeStore(clock);
+  const replicas: Awaited<ReturnType<typeof bootApi>>[] = [];
 
   beforeAll(async () => {
-    edge = await bootApi(
-      defineEdgeService({
-        store: own,
-        peppers: PEPPERS,
-        clock: { now: () => now },
-        shed: { addressBurst: 400, addressRate: 1 },
-      }),
-      { service: "edge", roles: ["api"], env: ENV },
-    );
+    for (let i = 0; i < 2; i++) {
+      replicas.push(
+        await bootApi(
+          defineEdgeService({
+            store: own,
+            peppers: PEPPERS,
+            clock,
+            shed: { addressBurst: 400, addressRate: 1 },
+          }),
+          { service: "edge", roles: ["api"], env: ENV },
+        ),
+      );
+    }
   });
 
   afterAll(async () => {
-    await edge.stop();
+    for (const replica of replicas) await replica.stop();
   });
 
-  const call = (key: string, ip = "8.8.8.8") =>
-    edge.send({
+  const replica = (i: number) => replicas[i] as Awaited<ReturnType<typeof bootApi>>;
+  const call = (key: string, ip = "8.8.8.8", on = 0) =>
+    replica(on).send({
       host: HOST,
       path: "/v4/whoami",
       headers: { ...HTTPS, "cf-connecting-ip": ip, authorization: `Bearer ${key}` },
     });
   /** Lets the work registered after each answer run. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  /** `count` calls from `ip`, the first `spread` replicas taking turns: each status, a 429's Retry-After. */
+  const answers = async (key: string, ip: string, count: number, spread: number) => {
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const res = await call(key, ip, i % spread);
+      out.push(res.status === 429 ? `429 ${res.headers["retry-after"]}` : String(res.status));
+    }
+    return out;
+  };
+  const lastLine = (on: number) =>
+    replica(on)
+      .stdout.filter((l) => l.event === "request")
+      .at(-1) as unknown as Record<string, unknown>;
+  /** A wrong secret for a key ID with a row, and a key ID with none. */
+  const pair = () => {
+    const existing = own.add("test", "rk");
+    return {
+      withRow: newKey("test", "rk", SALT, undefined, existing.slice(12, 22)).key,
+      noRow: newKey("test", "rk", SALT).key,
+    };
+  };
 
   it("touches 'last used' once a minute per key, not on every request", async () => {
     const key = own.add("test", "rk");
@@ -417,39 +464,61 @@ describe("on a clock the test moves", () => {
     expect(own.touched.filter((t) => t === id)).toHaveLength(2);
   });
 
-  it("answers a key ID with no row the same 401s, then 429s, as a key ID with a row", async () => {
-    const existing = own.add("test", "rk");
-    const wrongSecret = newKey("test", "rk", SALT, undefined, existing.slice(12, 22)).key;
-    const noRow = newKey("test", "rk", SALT).key;
-    const statuses = async (key: string, ip: string) => {
-      const out: number[] = [];
-      for (let i = 0; i < 35; i++) out.push((await call(key, ip)).status);
-      return out;
-    };
-    const withRow = await statuses(wrongSecret, "8.8.9.1");
+  it.each([
+    [1, "one replica"],
+    [2, "two replicas taking turns"],
+  ])(
+    "answers a key ID with no row the same 401s, then 429s, as a key ID with a row (%i: %s)",
+    async (spread) => {
+      const keys = pair();
+      const withRow = await answers(keys.withRow, `8.8.9.${spread}`, 40, spread);
+      const before = own.statements;
+      const withoutRow = await answers(keys.noRow, `8.8.10.${spread}`, 40, spread);
+      // 10:01:01 on the test's clock: 59 seconds left in the window, by Postgres and by the filter.
+      expect(withRow).toEqual([
+        ...Array<string>(30).fill("401"),
+        ...Array<string>(10).fill("429 59"),
+      ]);
+      expect(withoutRow).toEqual(withRow);
+      // Postgres counted every refusal of the ID with no row until its window was full, and each
+      // replica's first after that (a lookup and a count each); the filter answered the rest.
+      expect(own.statements - before).toBe(2 * (30 + spread));
+      for (let on = 0; on < spread; on++) {
+        expect(lastLine(on)).toMatchObject({
+          status: 429,
+          keyReason: "unknown",
+          rateLimited: true,
+          violatedPolicies: ["refused_keys"],
+          dbQueries: 0,
+        });
+      }
+      const limited = await call(keys.noRow, `8.8.10.${spread}`, 0);
+      expect(limited.json()).toMatchObject({
+        code: "rate_limited",
+        violated_policies: ["refused_keys"],
+      });
+    },
+  );
+
+  it("keeps a full window no longer than Postgres does: the next minute starts at 401 for both", async () => {
+    const keys = pair();
+    for (const [key, ip] of [
+      [keys.withRow, "8.8.11.1"],
+      [keys.noRow, "8.8.11.2"],
+    ] as const) {
+      expect((await answers(key, ip, 32, 2)).slice(29)).toEqual(["401", "429 59", "429 59"]);
+    }
+    // The window's last millisecond: still full for both, with a second to wait.
+    now += 58_999;
+    expect(await answers(keys.withRow, "8.8.11.1", 2, 2)).toEqual(["429 1", "429 1"]);
     const before = own.statements;
-    const withoutRow = await statuses(noRow, "8.8.9.2");
-    expect(withRow).toEqual([...Array<number>(30).fill(401), ...Array<number>(5).fill(429)]);
-    expect(withoutRow).toEqual(withRow);
-    // Only the first refusal of the ID with no row reached the store: its lookup and its count.
-    expect(own.statements - before).toBe(2);
-    const line = edge.stdout.filter((l) => l.event === "request").at(-1) as unknown as Record<
-      string,
-      unknown
-    >;
-    expect(line).toMatchObject({
-      status: 429,
-      keyReason: "unknown",
-      rateLimited: true,
-      violatedPolicies: ["refused_keys"],
-      dbQueries: 0,
-    });
-    const limited = await call(noRow, "8.8.9.2");
-    expect(limited.json()).toMatchObject({
-      code: "rate_limited",
-      violated_policies: ["refused_keys"],
-    });
-    expect(limited.headers["retry-after"]).toBe("59");
+    expect(await answers(keys.noRow, "8.8.11.2", 2, 2)).toEqual(["429 1", "429 1"]);
+    expect(own.statements).toBe(before);
+    // The next minute: Postgres's window starts again, and so does the filter, on either replica.
+    now += 1;
+    expect(await answers(keys.withRow, "8.8.11.1", 2, 2)).toEqual(["401", "401"]);
+    expect(await answers(keys.noRow, "8.8.11.2", 2, 2)).toEqual(["401", "401"]);
+    expect(own.statements - before).toBe(8);
   });
 });
 

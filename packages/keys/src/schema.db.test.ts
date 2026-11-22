@@ -259,7 +259,34 @@ describe("the edge's statement", () => {
     const counted = await store.count(keyWindowKey(keyId));
     expect(counted.secondsLeft).toBeGreaterThanOrEqual(1);
     expect(counted.secondsLeft).toBeLessThanOrEqual(60);
+    expect(counted.secondsLeft).toBe(Math.max(1, Math.ceil(counted.msLeft / 1000)));
     expect((await store.lookup("ZZZZZZZZZZ", window)).record).toBeNull();
+  });
+
+  it("answers a count's time left by the database's clock, rounded down, so it never runs past the window's end", async () => {
+    const store = keyStore(await as("fin_edge_a"));
+    const clockMs = async () =>
+      Number(
+        (
+          await su.query<{ ms: string }>(
+            "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint::text AS ms",
+          )
+        ).rows[0]?.ms,
+      );
+    // Read the database's clock either side of the count, in one minute (tried again if a minute
+    // ends between them): the count ran between the two readings.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const before = await clockMs();
+      const counted = await store.count(refusedWindowKey(`clock-${attempt}`));
+      const after = await clockMs();
+      const minute = Math.floor(before / 60_000);
+      if (Math.floor(after / 60_000) !== minute) continue;
+      const end = (minute + 1) * 60_000;
+      expect(before + counted.msLeft).toBeLessThanOrEqual(end);
+      expect(after + counted.msLeft).toBeGreaterThanOrEqual(end - 1);
+      return;
+    }
+    throw new Error("three minutes ended between the readings");
   });
 
   it("uses the key table's primary key (EXPLAIN)", async () => {
