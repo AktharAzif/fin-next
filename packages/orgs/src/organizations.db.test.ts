@@ -94,7 +94,7 @@ describe("POST /api/orgs/first", () => {
 
 describe("POST /api/orgs", () => {
   // Genuinely heavy, so a timeout of its own: one person makes ten organisations, the limit it is
-  // about, each with its own intent and proof. Alone it takes 1.0 to 1.8 s; in the full db run on
+  // about, each with its own intent and proof. Alone it takes up to 1.8 s; in the full db run on
   // 4 CPUs, up to 4.4 s.
   it("needs a factor and an intent, makes a Super admin, and allows at most 10 as Super admin", async () => {
     const who = await person(h, "creator");

@@ -54,7 +54,7 @@ afterAll(async () => {
 describe("a removal", () => {
   // Genuinely heavy, so a timeout of its own: a custom role made with a proof, two members, each
   // invited with a proof, signed in, given an authenticator and accepted with a proof, then the
-  // removal with its proof. Alone it takes 1.2 to 1.4 s; in the full db run on 4 CPUs, up to
+  // removal with its proof. Alone it takes up to 1.4 s; in the full db run on 4 CPUs, up to
   // 2.9 s.
   it("rolls at once what the actor may roll, the rest with an hour's overlap, in the same unit", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner");

@@ -175,7 +175,7 @@ describe("one live code per address (§5.2, S2-38)", () => {
   // Genuinely heavy, so each case has a timeout of its own: six runs of two addresses, each run
   // six overlapping sign-ups, code requests and tries that queue on the same locks (the race it
   // is about, which needs the runs), after a code sign-in for the registered address. Alone a
-  // case takes 1.6 to 2.0 s; in the full db run on 4 CPUs, 3.7 s to past the 5 s default.
+  // case takes 1.2 to 2.0 s; in the full db run on 4 CPUs, 2.7 s to past the 5 s default.
   it.each([
     ["from one network", true],
     ["each from its own network", false],

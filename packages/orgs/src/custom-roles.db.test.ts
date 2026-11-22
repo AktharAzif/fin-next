@@ -288,7 +288,7 @@ describe("deleting a custom role", () => {
 
   // Genuinely heavy, so a timeout of its own: two custom roles, a member and two invitations, each
   // with a proof, the deletion with its proof, then the invitee signed in and accepting with a
-  // proof. Alone it takes 1.3 s; in the full db run on 4 CPUs, 2.8 s.
+  // proof. Alone it takes 0.8 to 1.3 s; in the full db run on 4 CPUs, 2.2 to 2.8 s.
   it("withdraws, never leaves unusable, the invitations whose inviter cannot give the new role", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter_inviters");
     const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
@@ -340,7 +340,7 @@ describe("deleting a custom role", () => {
 describe("an edit that leaves an inviter unable to give an invitation", () => {
   // Genuinely heavy, so a timeout of its own: three custom roles, a member invited, signed in,
   // given an authenticator and accepted, three invitations and three role edits, each with a
-  // proof. Alone it takes 0.9 to 1.7 s; in the full db run on 4 CPUs, 3.7 s to past the 5 s
+  // proof. Alone it takes 0.9 to 1.7 s; in the full db run on 4 CPUs, 2.0 s to past the 5 s
   // default.
   it("withdraws it, whether the inviter's role lost a permission or the offered role gained one", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "edit_inviters");

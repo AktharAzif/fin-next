@@ -151,7 +151,7 @@ describe("every intent route of Fin Admin (§7.5)", () => {
 
   // Genuinely heavy, so each case has a timeout of its own: its scenario (for staff.remove and
   // staff.reset_factors, two staff members enrolled through the host first), then about twenty
-  // requests over the host with four passkey ceremonies. Alone the heaviest case takes 0.9 to
+  // requests over the host with four passkey ceremonies. Alone the heaviest case takes up to
   // 1.3 s; in the full db run on 4 CPUs, up to 2.5 s.
   it.each(intentRoutes.map((p) => [p.id, p.method, p.action] as const))(
     "%s refuses every intent but its own proved, unspent one, and passes once",

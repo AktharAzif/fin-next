@@ -33,7 +33,7 @@ afterAll(async () => {
 describe("a role change", () => {
   // Genuinely heavy, so a timeout of its own: a member invited with a proof, signed in, given an
   // authenticator and accepted with a proof, a custom role made with a proof, then two role changes
-  // with proofs. Alone it takes 1.4 s; in the full db run on 4 CPUs, 3.1 s.
+  // with proofs. Alone it takes up to 1.4 s; in the full db run on 4 CPUs, up to 3.1 s.
   it("writes member.role_changed, tells the person and every Super admin, and lowers into the journal", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner");
     const admin = await memberOf(h, who, orgId, "admin", "admin");
@@ -63,7 +63,7 @@ describe("a role change", () => {
 
   // Genuinely heavy, so a timeout of its own: four members, each invited with a proof, signed in,
   // given an authenticator and accepted with a proof, two custom roles made with proofs, then ten
-  // role changes and removals. Alone it takes 1.6 to 2.2 s; in the full db run on 4 CPUs, 3.3 s
+  // role changes and removals. Alone it takes 0.9 to 2.2 s; in the full db run on 4 CPUs, 3.2 s
   // to past the 5 s default.
   it("refuses giving beyond one's role, the top role from anyone else, one's own role, and the same role", async () => {
     const { who, orgId, memberId: ownerMember } = await ownerWithOrganization(h, "owner_rules");

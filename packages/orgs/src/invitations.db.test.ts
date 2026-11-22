@@ -254,7 +254,7 @@ describe("an invitation", () => {
 
   // Genuinely heavy, so a timeout of its own: a custom role and two members, each invited with a
   // proof, signed in, given an authenticator and accepted with a proof, then four invitations with
-  // proofs. Alone it takes 1.4 to 1.5 s; in the full db run on 4 CPUs, 3.5 to 4.3 s.
+  // proofs. Alone it takes 1.0 to 1.5 s; in the full db run on 4 CPUs, 2.4 to 4.3 s.
   it("is replaced only by someone it does not outrank (§8.5, as a cancellation)", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_replace_rank");
     const inviters = await roleAs(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
@@ -307,8 +307,8 @@ describe("an invitation", () => {
 
   // Genuinely heavy, so a timeout of its own: a member invited, signed in, given an authenticator
   // and accepted, an invitation and its change, then the invitee signed in, given an authenticator
-  // and accepting, each step with a proof. Alone it takes 1.1 s; in the full db run on 4 CPUs,
-  // 2.6 s.
+  // and accepting, each step with a proof. Alone it takes up to 1.1 s; in the full db run on 4
+  // CPUs, up to 2.6 s.
   it("is accepted after another member changed its role, under the member who changed it", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_changer");
     const admin = await memberOf(h, who, orgId, "first_inviter", "admin");
@@ -348,7 +348,7 @@ describe("an invitation", () => {
 
   // Genuinely heavy, so a timeout of its own: two members, each invited, signed in, given an
   // authenticator and accepted, two invitations, a custom role, a demotion and a removal, each with
-  // a proof. Alone it takes 1.3 s; in the full db run on 4 CPUs, 3.7 to 3.8 s.
+  // a proof. Alone it takes 0.9 to 1.3 s; in the full db run on 4 CPUs, 2.2 to 3.8 s.
   it("is withdrawn when its inviter is demoted below it, or removed", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_withdraw");
     const admin = await memberOf(h, who, orgId, "inviter", "admin");
