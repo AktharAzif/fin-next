@@ -48,7 +48,7 @@ describe("the refusals a round trip comes back with", () => {
       unable_to_create_user: "googleNoSignup",
       signup_disabled: "googleNoSignup",
       google_failed: "googleOurSide",
-      invalid_code: "googleOurSide",
+      invalid_code: "googleUnfinished",
       unable_to_get_user_info: "googleOurSide",
       internal_server_error: "googleOurSide",
       email_not_found: "googleIncomplete",

@@ -92,8 +92,10 @@ export function googleState(error: GoogleError): GoogleState {
     case "unable_to_create_user":
     case "signup_disabled":
       return "googleNoSignup";
+    // Only Fin's own `google_failed` (and the library's internal errors) say Google sign-in is
+    // not working; a code the provider refused (`invalid_code`) is a round trip that did not
+    // finish, which trying again fixes.
     case "google_failed":
-    case "invalid_code":
     case "unable_to_get_user_info":
     case "internal_server_error":
       return "googleOurSide";

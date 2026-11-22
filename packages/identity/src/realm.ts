@@ -31,6 +31,7 @@ import { AuthRefusal, problemResponse } from "./errors.ts";
 import { googleCallbackLocation, googleRequestRefusal } from "./google/hooks.ts";
 import { finGooglePlugin } from "./google/plugin.ts";
 import { createGoogleSignIn, type GoogleSignIn } from "./google/provider.ts";
+import { claimState, type StateClaim } from "./google/state.ts";
 import { afterHook } from "./hooks/after.ts";
 import { beforeHook } from "./hooks/before.ts";
 import type { HookContext } from "./hooks/context.ts";
@@ -110,6 +111,8 @@ export interface Realm {
 }
 
 const BASE_PATH = "/api/auth";
+/** The one callback path Google comes back to, after `/api/auth` (§4.2, §5.8). */
+const GOOGLE_CALLBACK = "/callback/google";
 
 function idPrefixFor(realm: RealmSettings["realm"], model: string): IdPrefix {
   switch (model) {
@@ -192,6 +195,12 @@ export function buildAuthOptions(
     session: {
       expiresIn: developer ? 86_400 : 3_600,
       updateAge: developer ? 600 : 300,
+      // The library's own "fresh session" rule (a session made in the last day) is off in both
+      // realms: on the reachable paths it guards (`/unlink-account`, passkey registration) Fin's
+      // step-up intent (§7.6) and first-factor rule (§6.3) are the freshness proof, and the others
+      // (`/list-sessions`, `/delete-user`) are blocked (§4.2). A developer session lives up to 7
+      // days (§11.1), so the library's rule would refuse those paths after a passed step-up.
+      freshAge: 0,
       cookieCache: { enabled: false },
       additionalFields: developer
         ? {
@@ -369,6 +378,9 @@ export function createRealm(deps: RealmDeps): Realm {
     requests: new AsyncLocalStorage<RequestState>(),
     docsOrigin: deps.docsOrigin,
   };
+  // The library signs the state cookie with the newest secret, and reads it back with that one.
+  const signing = settings.secrets[0];
+  if (signing === undefined) throw new Error("identity: a realm without a secret");
   const google =
     settings.google === null || settings.realm !== "developer"
       ? null
@@ -378,6 +390,7 @@ export function createRealm(deps: RealmDeps): Realm {
           lines: deps.lines,
           realm: "developer",
           stateCookie: `${settings.cookiePrefix}.state`,
+          stateSecret: signing.value,
           flow: () => requestState(rt).google,
           ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
         });
@@ -385,23 +398,29 @@ export function createRealm(deps: RealmDeps): Realm {
 
   /**
    * Google's callback does its outbound calls (the code exchange, the provider's keys) before the
-   * request's unit of work opens, reading the OAuth state in a short unit of its own, so no pooled
-   * client is held across them (ARCHITECTURE principle 14).
+   * request's unit of work opens, so no pooled client is held across them (ARCHITECTURE principle
+   * 14). In a short unit of its own it counts the network's exchange allowance (§5.6) and then
+   * claims the OAuth state, so one state buys at most one exchange. Answers the problem the realm
+   * sends instead of the library's answer (the allowance is used up), or null.
    */
-  async function prefetchGoogle(request: Request, state: RequestState): Promise<void> {
-    if (google === null) return;
-    await rt.requests.run(state, () =>
-      google.prefetch(request, async (identifier) => {
-        const context = (await auth.$context) as unknown as {
-          internalAdapter: {
-            findVerificationValue(id: string): Promise<{ value: string } | null>;
-          };
-        };
-        return rt.db.unit(
-          async () =>
-            (await context.internalAdapter.findVerificationValue(identifier))?.value ?? null,
-          { requestId: state.context.requestId },
-        );
+  async function prefetchGoogle(request: Request, state: RequestState): Promise<Response | null> {
+    if (google === null) return null;
+    const claim = (oauthState: string): Promise<StateClaim> =>
+      rt.db.unit(
+        async (tx) => {
+          const network = rt.hasher.bucket("network", state.network);
+          const allowed = await rt.limits.consume(tx, "google_exchange", network);
+          if (!allowed.allowed) return { kind: "limited", retryAfter: allowed.retryAfter };
+          return claimState(tx, oauthState, rt.clock.now(), state.context.requestId);
+        },
+        { requestId: state.context.requestId },
+      );
+    const refused = await rt.requests.run(state, () => google.prefetch(request, claim));
+    if (refused === null) return null;
+    return problem(
+      state,
+      new AuthRefusal("rate_limited", "limits.google_exchange", {
+        retry_after: refused.retryAfter,
       }),
     );
   }
@@ -492,49 +511,60 @@ export function createRealm(deps: RealmDeps): Realm {
     }
     let response: Response;
     try {
-      if (rule.path === "/callback/:id" && request.method === "GET") {
-        await prefetchGoogle(request, state);
-      }
-      const answer = await rt.db.unit(
-        (tx) =>
-          rt.requests.run(state, async () => {
-            try {
-              const res = await auth.handler(request);
-              // The whole answer is read before the unit commits; nothing is sent until then.
-              return {
-                status: res.status,
-                headers: new Headers(res.headers),
-                body: await res.arrayBuffer(),
-              };
-            } catch (error) {
-              if (error instanceof AuthRefusal && !error.rollback) {
-                const refused = problem(state, error);
-                return {
-                  status: refused.status,
-                  headers: refused.headers,
-                  body: await refused.arrayBuffer(),
-                };
-              }
-              if (error instanceof LimitStoreError || error instanceof AuthRefusal)
-                tx.poison("refused");
-              throw error;
-            }
-          }),
-        { requestId: context.requestId },
-      );
-      if (!answer.headers.has("cache-control")) answer.headers.set("cache-control", "no-store");
-      if (google !== null && rule.path === "/callback/:id") {
-        googleCallbackLocation(answer.headers, state.google);
-      }
-      response = new Response(answer.body.byteLength === 0 ? null : answer.body, {
-        status: answer.status,
-        headers: answer.headers,
-      });
+      // Only Google's own callback path prefetches, never the pattern itself (§4.1).
+      const early =
+        path === GOOGLE_CALLBACK && request.method === "GET"
+          ? await prefetchGoogle(request, state)
+          : null;
+      response = early ?? (await libraryAnswer(request, state, rule));
     } catch (error) {
       response = failureResponse(rt, state, error);
     }
     finishLine(rt, state, response.status);
     return response;
+  }
+
+  /** The library's answer to an allowed request, in the request's unit of work (§3.5). */
+  async function libraryAnswer(
+    request: Request,
+    state: RequestState,
+    rule: EndpointRule,
+  ): Promise<Response> {
+    const answer = await rt.db.unit(
+      (tx) =>
+        rt.requests.run(state, async () => {
+          try {
+            const res = await auth.handler(request);
+            // The whole answer is read before the unit commits; nothing is sent until then.
+            return {
+              status: res.status,
+              headers: new Headers(res.headers),
+              body: await res.arrayBuffer(),
+            };
+          } catch (error) {
+            if (error instanceof AuthRefusal && !error.rollback) {
+              const refused = problem(state, error);
+              return {
+                status: refused.status,
+                headers: refused.headers,
+                body: await refused.arrayBuffer(),
+              };
+            }
+            if (error instanceof LimitStoreError || error instanceof AuthRefusal)
+              tx.poison("refused");
+            throw error;
+          }
+        }),
+      { requestId: state.context.requestId },
+    );
+    if (!answer.headers.has("cache-control")) answer.headers.set("cache-control", "no-store");
+    if (google !== null && rule.path === "/callback/:id") {
+      googleCallbackLocation(answer.headers, state.google);
+    }
+    return new Response(answer.body.byteLength === 0 ? null : answer.body, {
+      status: answer.status,
+      headers: answer.headers,
+    });
   }
 
   async function sessionOf(

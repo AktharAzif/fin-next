@@ -46,6 +46,11 @@ export const LIMITS = {
   staff_code_email: [{ ms: HOUR, max: 5 }],
   staff_code_sign_in: [{ ms: 10 * MINUTE, max: 12 }],
   step_up_intents: [{ ms: 10 * MINUTE, max: 30 }],
+  /**
+   * Google code exchanges a network may cause (stretch 5, §5.8): counted before the realm calls
+   * the token endpoint, as passkey_options is per IPv4 address or IPv6 /48.
+   */
+  google_exchange: [{ ms: MINUTE, max: 30 }],
 } as const satisfies Record<string, readonly LimitWindow[]>;
 
 export type LimitBucket =
